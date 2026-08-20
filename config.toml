@@ -1,0 +1,58 @@
+[scan]
+lookback_hours = 6
+minimum_cvss = 7.0
+maximum_cvss = 10.0
+maximum_exploit_matches = 5
+
+# A CVE must match at least one technology and one vulnerability signal.
+technology_keywords = [
+  "amazon web services",
+  "aws",
+  "azure",
+  "cloudflare",
+  "docker",
+  "envoy",
+  "google cloud",
+  "kubernetes",
+  "nginx",
+  "apache http server",
+  "apache tomcat",
+  "traefik",
+  "terraform",
+  "wordpress",
+]
+
+vulnerability_keywords = [
+  "authentication bypass",
+  "command injection",
+  "cross-site scripting",
+  "deserialization",
+  "path traversal",
+  "remote code execution",
+  "request smuggling",
+  "server-side request forgery",
+  "sql injection",
+  "ssrf",
+]
+
+web_cwes = [
+  "CWE-22",
+  "CWE-78",
+  "CWE-79",
+  "CWE-89",
+  "CWE-94",
+  "CWE-287",
+  "CWE-288",
+  "CWE-306",
+  "CWE-434",
+  "CWE-502",
+  "CWE-601",
+  "CWE-918",
+]
+
+exclude_keywords = []
+
+[feeds]
+nvd_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+exploitdb_csv_url = "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"
+

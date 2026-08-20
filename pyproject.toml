@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cve-signal"
+version = "0.1.0"
+description = "Scheduled CVE monitoring and Telegram alerts for web and cloud vulnerabilities."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "K0NGR3SS" }]
+dependencies = []
+
+[project.scripts]
+cve-signal = "cve_signal.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
