@@ -4,11 +4,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from urllib.parse import parse_qs, urlsplit
 
 from cve_signal.config import ScanConfig
 from cve_signal.filtering import is_interesting
 from cve_signal.models import CVE, Reference
-from cve_signal.nvd import parse_cve
+from cve_signal.nvd import NVDClient, parse_cve
 from cve_signal.state import StateStore
 
 
@@ -81,6 +82,29 @@ class NVDParsingTests(unittest.TestCase):
         self.assertEqual(cve.cwes, ("CWE-94",))
         self.assertIn("cloudflare example proxy 1.2", cve.products)
         self.assertTrue(cve.known_exploited)
+
+    def test_client_uses_modified_window_and_api_key_header(self) -> None:
+        requests = []
+
+        def opener(request, _timeout):
+            requests.append(request)
+            return b'{"totalResults": 0, "vulnerabilities": []}'
+
+        client = NVDClient(
+            "https://example.test/cves",
+            api_key="test-key",
+            opener=opener,
+        )
+        client.fetch_modified(
+            datetime(2026, 8, 20, 8, 0, tzinfo=timezone.utc),
+            datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(len(requests), 1)
+        query = parse_qs(urlsplit(requests[0].full_url).query)
+        self.assertEqual(query["lastModStartDate"], ["2026-08-20T08:00:00.000Z"])
+        self.assertEqual(query["lastModEndDate"], ["2026-08-20T09:00:00.000Z"])
+        self.assertEqual(requests[0].get_header("Apikey"), "test-key")
 
 
 class FilteringTests(unittest.TestCase):
