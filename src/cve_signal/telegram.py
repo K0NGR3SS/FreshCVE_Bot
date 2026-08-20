@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import os
+from datetime import timezone
 from typing import Callable
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -73,6 +74,7 @@ def format_alert(cve: CVE, matches: list[ExploitMatch]) -> str:
         "",
         html.escape(description),
         "",
+        f"<b>Published:</b> {cve.published.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         f"<b>Affected:</b> {html.escape(products)}",
         f"<b>CWE:</b> {html.escape(cwes)}",
     ]
@@ -103,4 +105,3 @@ def _truncate(value: str, limit: int) -> str:
 def _send_request(request: Request, timeout: float) -> bytes:
     with urlopen(request, timeout=timeout) as response:
         return response.read()
-

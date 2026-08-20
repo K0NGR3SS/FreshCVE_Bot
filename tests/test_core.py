@@ -62,6 +62,7 @@ NVD_FIXTURE = {
 def scan_config() -> ScanConfig:
     return ScanConfig(
         lookback_hours=6,
+        maximum_cve_age_hours=48,
         minimum_cvss=7.0,
         maximum_cvss=10.0,
         maximum_exploit_matches=5,

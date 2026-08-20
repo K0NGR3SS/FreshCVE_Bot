@@ -36,6 +36,7 @@ def run_scan(
         end = end.replace(tzinfo=timezone.utc)
     hours = lookback_hours or config.scan.lookback_hours
     start = end - timedelta(hours=hours)
+    oldest_allowed = end - timedelta(hours=config.scan.maximum_cve_age_hours)
 
     nvd = nvd_client or NVDClient(config.feeds.nvd_url)
     cves = nvd.fetch_modified(start, end)
@@ -44,7 +45,11 @@ def run_scan(
     with StateStore(state_path) as state:
         for cve in cves:
             state.record_seen(cve.cve_id, end)
-            if is_interesting(cve, config.scan) and not state.was_notified(cve.cve_id):
+            if (
+                cve.published >= oldest_allowed
+                and is_interesting(cve, config.scan)
+                and not state.was_notified(cve.cve_id)
+            ):
                 candidates.append(cve)
 
         if not candidates:
@@ -74,4 +79,3 @@ def run_scan(
         matched=len(candidates),
         notified=notified,
     )
-

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import json
@@ -135,6 +136,24 @@ class PipelineTests(unittest.TestCase):
                 telegram_factory=lambda: self.fail("Telegram should not be initialized"),
             )
 
+        self.assertEqual(result.notified, 0)
+
+    def test_ignores_old_cve_that_was_only_recently_modified(self) -> None:
+        old_cve = replace(
+            interesting_cve(),
+            published=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            modified=datetime(2026, 8, 20, 9, 30, tzinfo=timezone.utc),
+        )
+        with TemporaryDirectory() as temp_dir:
+            result = run_scan(
+                self.config,
+                Path(temp_dir) / "state.sqlite3",
+                now=datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc),
+                nvd_client=StaticNVDClient([old_cve]),
+                telegram_factory=lambda: self.fail("Telegram should not be initialized"),
+            )
+
+        self.assertEqual(result.matched, 0)
         self.assertEqual(result.notified, 0)
 
 

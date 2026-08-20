@@ -8,6 +8,7 @@ import tomllib
 @dataclass(frozen=True)
 class ScanConfig:
     lookback_hours: int
+    maximum_cve_age_hours: int
     minimum_cvss: float
     maximum_cvss: float
     maximum_exploit_matches: int
@@ -38,6 +39,7 @@ def load_config(path: Path) -> AppConfig:
     return AppConfig(
         scan=ScanConfig(
             lookback_hours=int(scan["lookback_hours"]),
+            maximum_cve_age_hours=int(scan["maximum_cve_age_hours"]),
             minimum_cvss=float(scan["minimum_cvss"]),
             maximum_cvss=float(scan["maximum_cvss"]),
             maximum_exploit_matches=int(scan["maximum_exploit_matches"]),
@@ -51,4 +53,3 @@ def load_config(path: Path) -> AppConfig:
             exploitdb_csv_url=str(feeds["exploitdb_csv_url"]),
         ),
     )
-
