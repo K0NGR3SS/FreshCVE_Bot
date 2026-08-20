@@ -1,4 +1,6 @@
-# cve-signal
+![CVE Signal logo](./assets/cve-signal.png)
+
+# CVE-SIGNAL
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Telegram](https://img.shields.io/badge/Alerts-Telegram-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots/api)
