@@ -3,11 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sys
 from typing import Callable
 
 from cve_signal.config import AppConfig
-from cve_signal.exploits import ExploitDBClient
+from cve_signal.exploits import ExploitDBClient, ExploitMatch
 from cve_signal.filtering import is_interesting
+from cve_signal.github_pocs import GitHubPoCClient
+from cve_signal.models import CVE
 from cve_signal.nvd import NVDClient
 from cve_signal.state import StateStore
 from cve_signal.telegram import TelegramClient, format_alert
@@ -29,6 +32,7 @@ def run_scan(
     now: datetime | None = None,
     nvd_client: NVDClient | None = None,
     exploit_client: ExploitDBClient | None = None,
+    github_client: GitHubPoCClient | None = None,
     telegram_factory: Callable[[], TelegramClient] = TelegramClient.from_environment,
 ) -> ScanResult:
     end = now or datetime.now(timezone.utc)
@@ -56,13 +60,16 @@ def run_scan(
             return ScanResult(fetched=len(cves), matched=0, notified=0)
 
         exploits = exploit_client or ExploitDBClient(config.feeds.exploitdb_csv_url)
+        github = github_client or GitHubPoCClient()
         telegram = None if dry_run else telegram_factory()
         notified = 0
 
         for cve in candidates:
-            matches = exploits.find_matches(
+            matches = _find_exploits(
                 cve,
-                limit=config.scan.maximum_exploit_matches,
+                exploits,
+                github,
+                config.scan.maximum_exploit_matches,
             )
             message = format_alert(cve, matches)
             if dry_run:
@@ -79,3 +86,23 @@ def run_scan(
         matched=len(candidates),
         notified=notified,
     )
+
+
+def _find_exploits(
+    cve: CVE,
+    exploitdb: ExploitDBClient,
+    github: GitHubPoCClient,
+    limit: int,
+) -> list[ExploitMatch]:
+    matches: list[ExploitMatch] = []
+    for source, finder in (
+        ("Exploit-DB", exploitdb.find_matches),
+        ("GitHub", github.find_matches),
+    ):
+        try:
+            matches.extend(finder(cve, limit=limit))
+        except (OSError, ValueError):
+            print(f"{source} enrichment unavailable for {cve.cve_id}", file=sys.stderr)
+
+    unique = {match.url: match for match in matches}
+    return sorted(unique.values(), key=lambda item: (-item.score, item.title))[:limit]
