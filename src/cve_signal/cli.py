@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 
 from cve_signal import __version__
 from cve_signal.config import load_config
+from cve_signal.pipeline import run_scan
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,8 +25,19 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
-    lookback = args.since_hours or config.scan.lookback_hours
-    print(f"cve-signal configured with a {lookback}-hour lookback")
-    if args.dry_run:
-        print("dry-run mode enabled")
+    try:
+        result = run_scan(
+            config,
+            args.state,
+            lookback_hours=args.since_hours,
+            dry_run=args.dry_run,
+        )
+    except Exception as error:
+        print(f"cve-signal failed: {error}", file=sys.stderr)
+        return 1
+
+    print(
+        f"fetched={result.fetched} matched={result.matched} "
+        f"notified={result.notified}"
+    )
     return 0
