@@ -84,6 +84,17 @@ class NVDParsingTests(unittest.TestCase):
         self.assertIn("cloudflare example proxy 1.2", cve.products)
         self.assertTrue(cve.known_exploited)
 
+    def test_treats_timezone_less_nvd_timestamps_as_utc(self) -> None:
+        fixture = {
+            **NVD_FIXTURE,
+            "published": "2026-08-20T08:00:00.000",
+            "lastModified": "2026-08-20T09:00:00.000",
+        }
+        cve = parse_cve(fixture)
+
+        self.assertEqual(cve.published.tzinfo, timezone.utc)
+        self.assertEqual(cve.modified.tzinfo, timezone.utc)
+
     def test_client_uses_modified_window_and_api_key_header(self) -> None:
         requests = []
 
