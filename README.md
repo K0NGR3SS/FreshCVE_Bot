@@ -16,11 +16,11 @@ Every three hours, GitHub Actions:
 
 1. Fetches recently published or updated CVEs from the NVD.
 2. Filters them by CVSS score, CWE, cloud/web technology, and configurable keywords.
-3. Searches NVD references, Exploit-DB metadata, and public GitHub repositories for possible exploit or PoC matches.
-4. Ranks up to five matches and sends the result to Telegram.
-5. Saves notification state so the same CVE is not sent twice.
+3. Searches exploit-oriented NVD references, richer Exploit-DB metadata, and public GitHub repository names, descriptions, topics, and README files for possible exploit or PoC matches.
+4. Ranks up to five evidence-backed matches and sends the result to Telegram.
+5. Rechecks recent CVEs and sends one follow-up when a newly published exploit URL appears, without repeating previously delivered links.
 
-If nothing relevant is found, no Telegram message is sent. The project only links to public exploit metadata and repositories; it does not download or execute exploit code.
+An initial CVE alert can report that no public exploit was found yet. The CVE remains eligible for enrichment until `maximum_cve_age_hours` expires, so a delayed PoC can generate a follow-up alert. The project only links to public exploit metadata and repositories; it does not download or execute exploit code.
 
 ## Use it yourself
 

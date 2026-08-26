@@ -59,7 +59,12 @@ class TelegramClient:
             raise RuntimeError(f"Telegram rejected the message: {response.get('description', 'unknown error')}")
 
 
-def format_alert(cve: CVE, matches: list[ExploitMatch]) -> str:
+def format_alert(
+    cve: CVE,
+    matches: list[ExploitMatch],
+    *,
+    is_update: bool = False,
+) -> str:
     severity = cve.cvss_severity or "UNKNOWN"
     score = f"{cve.cvss_score:.1f}" if cve.cvss_score is not None else "N/A"
     kev = " · CISA KEV" if cve.known_exploited else ""
@@ -68,8 +73,10 @@ def format_alert(cve: CVE, matches: list[ExploitMatch]) -> str:
     cwes = ", ".join(cve.cwes) or "Not specified"
     nvd_url = f"https://nvd.nist.gov/vuln/detail/{cve.cve_id}"
 
+    icon = "🔎" if is_update else "🚨"
+    suffix = " · NEW EXPLOIT MATCH" if is_update else ""
     lines = [
-        f'🚨 <b><a href="{nvd_url}">{html.escape(cve.cve_id)}</a></b>',
+        f'{icon} <b><a href="{nvd_url}">{html.escape(cve.cve_id)}</a>{suffix}</b>',
         f"<b>{html.escape(severity)}</b> · CVSS {score}{kev}",
         "",
         html.escape(description),
@@ -80,10 +87,18 @@ def format_alert(cve: CVE, matches: list[ExploitMatch]) -> str:
     ]
 
     if matches:
-        lines.extend(("", f"<b>Public exploit matches ({len(matches)}):</b>"))
+        label = "New public exploit matches" if is_update else "Public exploit matches"
+        lines.extend(("", f"<b>{label} ({len(matches)}):</b>"))
         for index, match in enumerate(matches, start=1):
             metadata = " · ".join(
-                value for value in (match.source, match.platform, match.exploit_type) if value
+                value
+                for value in (
+                    match.source,
+                    match.platform,
+                    match.exploit_type,
+                    match.reason,
+                )
+                if value
             )
             lines.append(
                 f'{index}. <a href="{html.escape(match.url, quote=True)}">'

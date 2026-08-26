@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import json
 import unittest
+from urllib.parse import parse_qs, urlsplit
 
 from cve_signal.config import AppConfig, FeedConfig
 from cve_signal.exploits import ExploitDBClient, ExploitMatch
@@ -80,6 +81,50 @@ class ExploitMatchingTests(unittest.TestCase):
         self.assertEqual(matches[0].url, "https://www.exploit-db.com/exploits/99999")
         self.assertEqual(matches[0].reason, "linked directly from the CVE record")
 
+    def test_matches_cve_variants_in_exploitdb_metadata(self) -> None:
+        csv_payload = b"""id,file,description,codes,aliases,tags,platform,type
+22222,exploits/webapps/CVE_2026_12345.py,Generic proxy exploit,,,,linux,webapps
+"""
+        client = ExploitDBClient(
+            "https://example.test/exploits.csv",
+            fetcher=lambda _url, _timeout: csv_payload,
+        )
+
+        matches = client.find_matches(interesting_cve())
+
+        self.assertEqual(len(matches), 2)
+        database_match = next(match for match in matches if match.url.endswith("/22222"))
+        self.assertEqual(database_match.reason, "exact CVE match")
+
+    def test_does_not_match_a_longer_cve_identifier(self) -> None:
+        csv_payload = b"""id,file,description,codes,aliases,tags,platform,type
+33333,exploit.py,Generic exploit,CVE-2026-123456,,,linux,webapps
+"""
+        cve = replace(interesting_cve(), references=())
+        client = ExploitDBClient(
+            "https://example.test/exploits.csv",
+            fetcher=lambda _url, _timeout: csv_payload,
+        )
+
+        self.assertEqual(client.find_matches(cve), [])
+
+    def test_recognizes_untagged_github_poc_reference(self) -> None:
+        cve = replace(
+            interesting_cve(),
+            references=(
+                Reference("https://github.com/researcher/CVE_2026_12345-PoC"),
+            ),
+        )
+        client = ExploitDBClient(
+            "https://example.test/exploits.csv",
+            fetcher=lambda _url, _timeout: b"id,description\n",
+        )
+
+        matches = client.find_matches(cve)
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].source, "GitHub")
+
     def test_github_search_returns_only_canonical_public_repository_links(self) -> None:
         requests = []
         response = {
@@ -105,6 +150,16 @@ class ExploitMatchingTests(unittest.TestCase):
                     "stargazers_count": 100,
                     "topics": [],
                 },
+                {
+                    "name": "example-proxy-rce-poc",
+                    "full_name": "researcher/example-proxy-rce-poc",
+                    "description": "Proof of concept implementation",
+                    "private": False,
+                    "fork": False,
+                    "archived": False,
+                    "stargazers_count": 1,
+                    "topics": ["poc"],
+                },
             ]
         }
 
@@ -119,12 +174,16 @@ class ExploitMatchingTests(unittest.TestCase):
         )
         matches = client.find_matches(interesting_cve())
 
-        self.assertEqual(len(matches), 1)
+        self.assertEqual(len(matches), 2)
         self.assertEqual(matches[0].url, "https://github.com/researcher/CVE-2026-12345")
         self.assertEqual(matches[0].source, "GitHub")
         self.assertEqual(matches[0].exploit_type, "PoC candidate")
         self.assertEqual(requests[0].get_header("Authorization"), "Bearer github-token")
         self.assertIn("CVE-2026-12345", requests[0].full_url)
+        query = parse_qs(urlsplit(requests[0].full_url).query)["q"][0]
+        self.assertIn("in:name,description,topics,readme", query)
+        readme_match = next(match for match in matches if "example-proxy" in match.url)
+        self.assertIn("README search", readme_match.reason)
 
 
 class TelegramTests(unittest.TestCase):
@@ -133,6 +192,7 @@ class TelegramTests(unittest.TestCase):
         self.assertIn("CVE-2026-12345", message)
         self.assertIn("CVSS 9.8", message)
         self.assertIn("CISA KEV", message)
+        self.assertNotIn("exact CVE match", message)
         self.assertLessEqual(len(message), 4000)
 
     def test_posts_to_bot_api(self) -> None:
@@ -222,6 +282,42 @@ class PipelineTests(unittest.TestCase):
 
         self.assertIn("https://github.com/researcher/CVE-2026-12345", telegram.messages[0])
         self.assertIn("PoC candidate", telegram.messages[0])
+        self.assertIn("exact CVE ID in repository name", telegram.messages[0])
+
+    def test_sends_follow_up_when_a_poc_appears_later(self) -> None:
+        telegram = RecordingTelegram()
+        github_client = StaticGitHubPoCClient()
+        exploit_client = ExploitDBClient(
+            self.config.feeds.exploitdb_csv_url,
+            fetcher=lambda _url, _timeout: EXPLOIT_DB_CSV,
+        )
+        github_match = ExploitMatch(
+            title="researcher/CVE-2026-12345",
+            url="https://github.com/researcher/CVE-2026-12345",
+            source="GitHub",
+            score=115.0,
+            reason="exact CVE ID in repository name",
+            exploit_type="PoC candidate",
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.sqlite3"
+            kwargs = {
+                "now": datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc),
+                "nvd_client": StaticNVDClient([interesting_cve()]),
+                "exploit_client": exploit_client,
+                "github_client": github_client,
+                "telegram_factory": lambda: telegram,
+            }
+            first = run_scan(self.config, state_path, **kwargs)
+            github_client.matches = [github_match]
+            second = run_scan(self.config, state_path, **kwargs)
+            third = run_scan(self.config, state_path, **kwargs)
+
+        self.assertEqual((first.notified, second.notified, third.notified), (1, 1, 0))
+        self.assertEqual(len(telegram.messages), 2)
+        self.assertIn("NEW EXPLOIT MATCH", telegram.messages[1])
+        self.assertIn(github_match.url, telegram.messages[1])
 
     def test_ignores_old_cve_that_was_only_recently_modified(self) -> None:
         old_cve = replace(

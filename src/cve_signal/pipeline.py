@@ -38,7 +38,10 @@ def run_scan(
     end = now or datetime.now(timezone.utc)
     if end.tzinfo is None:
         end = end.replace(tzinfo=timezone.utc)
-    hours = lookback_hours or config.scan.lookback_hours
+    hours = max(
+        lookback_hours or config.scan.lookback_hours,
+        config.scan.maximum_cve_age_hours,
+    )
     start = end - timedelta(hours=hours)
     oldest_allowed = end - timedelta(hours=config.scan.maximum_cve_age_hours)
 
@@ -52,7 +55,6 @@ def run_scan(
             if (
                 cve.published >= oldest_allowed
                 and is_interesting(cve, config.scan)
-                and not state.was_notified(cve.cve_id)
             ):
                 candidates.append(cve)
 
@@ -71,14 +73,29 @@ def run_scan(
                 github,
                 config.scan.maximum_exploit_matches,
             )
-            message = format_alert(cve, matches)
+            was_notified = state.was_notified(cve.cve_id)
+            previous_urls = state.notified_match_urls(cve.cve_id)
+            new_matches = [match for match in matches if match.url not in previous_urls]
+            if was_notified and not new_matches:
+                continue
+
+            message = format_alert(
+                cve,
+                new_matches if was_notified else matches,
+                is_update=was_notified,
+            )
             if dry_run:
                 print(message)
                 print()
             else:
                 assert telegram is not None
                 telegram.send(message)
-                state.mark_notified(cve.cve_id)
+                state.mark_notified(cve.cve_id, end)
+                state.record_match_urls(
+                    cve.cve_id,
+                    {match.url for match in matches},
+                    end,
+                )
                 notified += 1
 
     return ScanResult(
@@ -104,5 +121,9 @@ def _find_exploits(
         except (OSError, ValueError):
             print(f"{source} enrichment unavailable for {cve.cve_id}", file=sys.stderr)
 
-    unique = {match.url: match for match in matches}
+    unique: dict[str, ExploitMatch] = {}
+    for match in matches:
+        previous = unique.get(match.url)
+        if previous is None or match.score > previous.score:
+            unique[match.url] = match
     return sorted(unique.values(), key=lambda item: (-item.score, item.title))[:limit]

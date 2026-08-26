@@ -17,6 +17,15 @@ JsonOpener = Callable[[Request, float], bytes]
 _GITHUB_SEARCH_URL = "https://api.github.com/search/repositories"
 _FULL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _POC_TOPICS = {"cve", "exploit", "poc", "proof-of-concept", "security"}
+_EXPLOIT_HINTS = (
+    "exploit",
+    "exploits",
+    "proof of concept",
+    "proof-of-concept",
+    "poc",
+    "pocs",
+    "rce",
+)
 
 
 class GitHubPoCClient:
@@ -34,8 +43,18 @@ class GitHubPoCClient:
         self._opener = opener or _open_request
 
     def find_matches(self, cve: CVE, limit: int = 5) -> list[ExploitMatch]:
-        query = f"{cve.cve_id} in:name,description fork:false archived:false is:public"
-        url = f"{self.search_url}?{urlencode({'q': query, 'sort': 'updated', 'order': 'desc', 'per_page': limit})}"
+        query = (
+            f'"{cve.cve_id}" in:name,description,topics,readme '
+            "fork:false archived:false is:public"
+        )
+        per_page = min(max(limit * 3, 10), 100)
+        params = {
+            "q": query,
+            "sort": "updated",
+            "order": "desc",
+            "per_page": per_page,
+        }
+        url = f"{self.search_url}?{urlencode(params)}"
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": "cve-signal/0.1 (+https://github.com/K0NGR3SS/cve-signal)",
@@ -63,19 +82,27 @@ def _repository_match(cve_id: str, item: dict[str, Any]) -> ExploitMatch | None:
     ):
         return None
 
-    identifier = cve_id.lower()
+    identifier = _compact(cve_id)
     name = str(item.get("name", "")).lower()
     description = str(item.get("description") or "").lower()
-    if identifier in name:
+    topics = {str(topic).lower() for topic in item.get("topics", [])}
+    searchable_summary = " ".join((name, description, *topics))
+
+    if _has_identifier(name, identifier):
         score = 115.0
         reason = "exact CVE ID in repository name"
-    elif identifier in description:
+    elif _has_identifier(description, identifier):
         score = 100.0
         reason = "exact CVE ID in repository description"
+    elif _has_identifier(" ".join(topics), identifier):
+        score = 96.0
+        reason = "exact CVE ID in repository topics"
+    elif _has_exploit_hint(searchable_summary):
+        score = 88.0
+        reason = "CVE ID matched by GitHub README search with PoC signals"
     else:
         return None
 
-    topics = {str(topic).lower() for topic in item.get("topics", [])}
     if topics.intersection(_POC_TOPICS):
         score += 3.0
     stars = max(int(item.get("stargazers_count", 0)), 0)
@@ -91,7 +118,23 @@ def _repository_match(cve_id: str, item: dict[str, Any]) -> ExploitMatch | None:
     )
 
 
+def _compact(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _has_identifier(value: str, identifier: str) -> bool:
+    compact_value = _compact(value)
+    return bool(re.search(rf"{re.escape(identifier)}(?!\d)", compact_value))
+
+
+def _has_exploit_hint(value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+    return any(
+        re.search(rf"\b{re.escape(hint)}\b", normalized)
+        for hint in _EXPLOIT_HINTS
+    )
+
+
 def _open_request(request: Request, timeout: float) -> bytes:
     with urlopen(request, timeout=timeout) as response:
         return response.read()
-

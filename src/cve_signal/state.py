@@ -19,6 +19,17 @@ class StateStore:
             )
             """
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS exploit_matches (
+                cve_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                first_notified TEXT NOT NULL,
+                PRIMARY KEY (cve_id, url),
+                FOREIGN KEY (cve_id) REFERENCES cves(cve_id)
+            )
+            """
+        )
         self._connection.commit()
 
     def close(self) -> None:
@@ -58,3 +69,26 @@ class StateStore:
             raise KeyError(f"CVE has not been recorded: {cve_id}")
         self._connection.commit()
 
+    def notified_match_urls(self, cve_id: str) -> set[str]:
+        rows = self._connection.execute(
+            "SELECT url FROM exploit_matches WHERE cve_id = ?", (cve_id,)
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def record_match_urls(
+        self,
+        cve_id: str,
+        urls: set[str],
+        notified_at: datetime | None = None,
+    ) -> None:
+        if not urls:
+            return
+        timestamp = (notified_at or datetime.now(timezone.utc)).isoformat()
+        self._connection.executemany(
+            """
+            INSERT OR IGNORE INTO exploit_matches (cve_id, url, first_notified)
+            VALUES (?, ?, ?)
+            """,
+            ((cve_id, url, timestamp) for url in urls),
+        )
+        self._connection.commit()

@@ -155,6 +155,20 @@ class StateStoreTests(unittest.TestCase):
                 state.mark_notified("CVE-2026-12345")
                 self.assertTrue(state.was_notified("CVE-2026-12345"))
 
+    def test_tracks_notified_exploit_urls_per_cve(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.sqlite3") as state:
+                state.record_seen("CVE-2026-12345")
+                state.record_match_urls(
+                    "CVE-2026-12345",
+                    {"https://github.com/researcher/CVE-2026-12345"},
+                )
+
+                self.assertEqual(
+                    state.notified_match_urls("CVE-2026-12345"),
+                    {"https://github.com/researcher/CVE-2026-12345"},
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
