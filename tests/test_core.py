@@ -31,6 +31,10 @@ NVD_FIXTURE = {
                     "version": "3.1",
                     "baseScore": 9.8,
                     "baseSeverity": "CRITICAL",
+                    "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                    "attackVector": "NETWORK",
+                    "privilegesRequired": "NONE",
+                    "userInteraction": "NONE",
                 },
             }
         ]
@@ -83,6 +87,8 @@ class NVDParsingTests(unittest.TestCase):
         self.assertEqual(cve.cwes, ("CWE-94",))
         self.assertIn("cloudflare example proxy 1.2", cve.products)
         self.assertTrue(cve.known_exploited)
+        self.assertEqual(cve.attack_vector, "Network")
+        self.assertEqual(cve.affected_ranges, ("cloudflare example proxy 1.2",))
 
     def test_treats_timezone_less_nvd_timestamps_as_utc(self) -> None:
         fixture = {
@@ -94,6 +100,34 @@ class NVDParsingTests(unittest.TestCase):
 
         self.assertEqual(cve.published.tzinfo, timezone.utc)
         self.assertEqual(cve.modified.tzinfo, timezone.utc)
+
+    def test_parses_cpe_version_ranges_for_display(self) -> None:
+        fixture = {
+            **NVD_FIXTURE,
+            "configurations": [
+                {
+                    "nodes": [
+                        {
+                            "cpeMatch": [
+                                {
+                                    "vulnerable": True,
+                                    "criteria": "cpe:2.3:a:cloudflare:example_proxy:*:*:*:*:*:*:*:*",
+                                    "versionStartIncluding": "1.2",
+                                    "versionEndExcluding": "1.4.3",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+        }
+
+        cve = parse_cve(fixture)
+
+        self.assertEqual(
+            cve.affected_ranges,
+            ("cloudflare example proxy >= 1.2 and < 1.4.3",),
+        )
 
     def test_client_uses_modified_window_and_api_key_header(self) -> None:
         requests = []
@@ -126,9 +160,15 @@ class FilteringTests(unittest.TestCase):
     def test_rejects_low_severity_cve(self) -> None:
         original = parse_cve(NVD_FIXTURE)
         cve = CVE(
-            **{**original.__dict__, "cvss_score": 6.9},
+            **{**original.__dict__, "cvss_score": 6.9, "known_exploited": False},
         )
         self.assertFalse(is_interesting(cve, scan_config()))
+
+    def test_keeps_known_exploited_cve_even_when_unscored(self) -> None:
+        original = parse_cve(NVD_FIXTURE)
+        cve = CVE(**{**original.__dict__, "cvss_score": None})
+
+        self.assertTrue(is_interesting(cve, scan_config()))
 
     def test_rejects_unrelated_technology(self) -> None:
         cve = CVE(
@@ -168,6 +208,31 @@ class StateStoreTests(unittest.TestCase):
                     state.notified_match_urls("CVE-2026-12345"),
                     {"https://github.com/researcher/CVE-2026-12345"},
                 )
+
+    def test_canonicalizes_equivalent_github_urls(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.sqlite3") as state:
+                state.record_seen("CVE-2026-12345")
+                state.record_match_urls(
+                    "CVE-2026-12345",
+                    {"https://www.github.com/researcher/repo/tree/main/?utm_source=test"},
+                )
+
+                self.assertEqual(
+                    state.notified_match_urls("CVE-2026-12345"),
+                    {"https://github.com/researcher/repo"},
+                )
+
+    def test_round_trips_monitored_cve(self) -> None:
+        cve = parse_cve(NVD_FIXTURE)
+        now = cve.published
+        with TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.sqlite3") as state:
+                state.monitor(cve, now, monitoring_days=30)
+
+                due = state.due_monitored(now)
+
+        self.assertEqual(due, [cve])
 
 
 if __name__ == "__main__":

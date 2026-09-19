@@ -57,11 +57,20 @@ class NVDClient:
 
         return results
 
+    def fetch_by_id(self, cve_id: str) -> CVE | None:
+        payload = self._request_json({"cveId": cve_id, "noRejected": ""})
+        vulnerabilities = payload.get("vulnerabilities", [])
+        if not vulnerabilities:
+            return None
+        return parse_cve(vulnerabilities[0]["cve"])
+
     def _request_json(self, params: dict[str, str]) -> dict[str, Any]:
         url = _with_query(self.base_url, params)
         headers = {
             "Accept": "application/json",
-            "User-Agent": "cve-signal/0.1 (+https://github.com/K0NGR3SS/cve-signal)",
+            "User-Agent": (
+                "cve-signal/0.2 (+https://github.com/K0NGR3SS/CVE2Exploit)"
+            ),
         }
         if self.api_key:
             headers["apiKey"] = self.api_key
@@ -83,7 +92,15 @@ class NVDClient:
 
 
 def parse_cve(raw: dict[str, Any]) -> CVE:
-    score, severity, version = _best_cvss(raw.get("metrics", {}))
+    (
+        score,
+        severity,
+        version,
+        vector,
+        attack_vector,
+        privileges_required,
+        user_interaction,
+    ) = _best_cvss(raw.get("metrics", {}))
     descriptions = raw.get("descriptions", [])
     description = next(
         (item["value"] for item in descriptions if item.get("lang") == "en"),
@@ -120,10 +137,31 @@ def parse_cve(raw: dict[str, Any]) -> CVE:
         products=tuple(sorted(set(_iter_products(raw.get("configurations", []))))),
         references=references,
         known_exploited=bool(raw.get("cisaExploitAdd")),
+        cvss_vector=vector,
+        attack_vector=attack_vector,
+        privileges_required=privileges_required,
+        user_interaction=user_interaction,
+        affected_ranges=tuple(
+            sorted(set(_iter_affected_ranges(raw.get("configurations", []))))
+        ),
+        kev_date_added=raw.get("cisaExploitAdd"),
+        kev_due_date=raw.get("cisaActionDue"),
+        kev_required_action=raw.get("cisaRequiredAction"),
+        known_ransomware_use=raw.get("cisaKnownRansomwareCampaignUse"),
     )
 
 
-def _best_cvss(metrics: dict[str, Any]) -> tuple[float | None, str | None, str | None]:
+def _best_cvss(
+    metrics: dict[str, Any],
+) -> tuple[
+    float | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+]:
     for metric_name in (
         "cvssMetricV40",
         "cvssMetricV31",
@@ -142,8 +180,24 @@ def _best_cvss(metrics: dict[str, Any]) -> tuple[float | None, str | None, str |
         severity = data.get("baseSeverity") or metric.get("baseSeverity")
         version = data.get("version")
         if score is not None:
-            return float(score), str(severity).upper() if severity else None, str(version) if version else None
-    return None, None, None
+            return (
+                float(score),
+                str(severity).upper() if severity else None,
+                str(version) if version else None,
+                str(data.get("vectorString")) if data.get("vectorString") else None,
+                _normalized_metric(
+                    data.get("attackVector") or data.get("accessVector")
+                ),
+                _normalized_metric(
+                    data.get("privilegesRequired") or data.get("authentication")
+                ),
+                _normalized_metric(data.get("userInteraction")),
+            )
+    return None, None, None, None, None, None, None
+
+
+def _normalized_metric(value: object) -> str | None:
+    return str(value).replace("_", " ").title() if value else None
 
 
 def _iter_products(configurations: Iterable[dict[str, Any]]) -> Iterable[str]:
@@ -159,11 +213,52 @@ def _products_from_nodes(nodes: Iterable[dict[str, Any]]) -> Iterable[str]:
             criteria = match.get("criteria", "")
             parts = criteria.split(":")
             if len(parts) >= 6:
-                vendor, product, version = (unquote(part).replace("_", " ") for part in parts[3:6])
-                label = " ".join(part for part in (vendor, product, version) if part not in {"*", "-"})
+                vendor, product, version = (
+                    unquote(part).replace("_", " ") for part in parts[3:6]
+                )
+                label = " ".join(
+                    part
+                    for part in (vendor, product, version)
+                    if part not in {"*", "-"}
+                )
                 if label:
                     yield label
         yield from _products_from_nodes(node.get("children", []))
+
+
+def _iter_affected_ranges(configurations: Iterable[dict[str, Any]]) -> Iterable[str]:
+    for configuration in configurations:
+        yield from _ranges_from_nodes(configuration.get("nodes", []))
+
+
+def _ranges_from_nodes(nodes: Iterable[dict[str, Any]]) -> Iterable[str]:
+    for node in nodes:
+        for match in node.get("cpeMatch", []):
+            if not match.get("vulnerable", False):
+                continue
+            parts = str(match.get("criteria", "")).split(":")
+            if len(parts) < 6:
+                continue
+            vendor, product, version = (
+                unquote(part).replace("_", " ") for part in parts[3:6]
+            )
+            name = " ".join(part for part in (vendor, product) if part not in {"*", "-"})
+            if not name:
+                continue
+            if version not in {"*", "-"}:
+                yield f"{name} {version}"
+                continue
+            bounds = []
+            for field, operator in (
+                ("versionStartIncluding", ">="),
+                ("versionStartExcluding", ">"),
+                ("versionEndIncluding", "<="),
+                ("versionEndExcluding", "<"),
+            ):
+                if match.get(field):
+                    bounds.append(f"{operator} {match[field]}")
+            yield f"{name} {' and '.join(bounds)}" if bounds else name
+        yield from _ranges_from_nodes(node.get("children", []))
 
 
 def _open_request(request: Request, timeout: float) -> bytes:

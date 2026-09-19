@@ -1,9 +1,18 @@
 [scan]
 lookback_hours = 6
+# Initial discovery window. Once selected, a CVE remains in the monitoring queue below.
 maximum_cve_age_hours = 48
 minimum_cvss = 7.0
 maximum_cvss = 10.0
 maximum_exploit_matches = 5
+# Recheck selected CVEs every 3 hours for 48 hours, then daily for 30 days.
+monitoring_days = 30
+early_recheck_hours = 3
+later_recheck_hours = 24
+# Bound API usage per workflow run and per GitHub search.
+github_candidates = 50
+github_readme_checks = 10
+maximum_cves_per_run = 25
 
 # A CVE must match at least one technology and one vulnerability signal.
 technology_keywords = [
@@ -77,3 +86,5 @@ exclude_keywords = []
 [feeds]
 nvd_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 exploitdb_csv_url = "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"
+epss_url = "https://api.first.org/data/v1/epss"
+kev_url = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
