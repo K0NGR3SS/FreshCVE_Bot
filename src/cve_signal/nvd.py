@@ -69,7 +69,7 @@ class NVDClient:
         headers = {
             "Accept": "application/json",
             "User-Agent": (
-                "cve-signal/0.2 (+https://github.com/K0NGR3SS/CVE2Exploit)"
+                "cve-signal/0.2 (+https://github.com/K0NGR3SS/FreshCVE_Bot)"
             ),
         }
         if self.api_key:

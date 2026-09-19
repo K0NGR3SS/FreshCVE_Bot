@@ -73,7 +73,7 @@ class GitHubPoCClient:
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": (
-                "cve-signal/0.2 (+https://github.com/K0NGR3SS/CVE2Exploit)"
+                "cve-signal/0.2 (+https://github.com/K0NGR3SS/FreshCVE_Bot)"
             ),
             "X-GitHub-Api-Version": "2026-03-10",
         }

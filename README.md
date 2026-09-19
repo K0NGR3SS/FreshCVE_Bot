@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Telegram](https://img.shields.io/badge/Alerts-Telegram-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots/api)
-[![CVE Signal](https://github.com/K0NGR3SS/CVE2Exploit/actions/workflows/cve-signal.yml/badge.svg)](https://github.com/K0NGR3SS/CVE2Exploit/actions/workflows/cve-signal.yml)
+[![CVE Signal](https://github.com/K0NGR3SS/FreshCVE_Bot/actions/workflows/cve-signal.yml/badge.svg)](https://github.com/K0NGR3SS/FreshCVE_Bot/actions/workflows/cve-signal.yml)
 
 A lightweight Python pipeline that monitors high-severity web and cloud CVEs, ranks public exploit evidence, enriches risk with CISA KEV and EPSS, and sends concise alerts to Telegram.
 
