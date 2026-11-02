@@ -423,18 +423,45 @@ class EUVDClient:
         self._opener = opener or _open_request
 
     def enrich(self, intel: Intel) -> None:
-        query = urlencode({"text": intel.cve_id, "page": 0, "size": 10})
-        payload = _get_json(
-            self._opener, f"{self.base_url}/vulnerabilities?{query}", timeout=self.timeout
+        cve_id = intel.cve_id.upper()
+        attempts = (
+            f"{self.base_url}/vulnerabilities?{urlencode({'text': cve_id, 'page': 0, 'size': 20})}",
+            f"{self.base_url}/search?{urlencode({'text': cve_id, 'page': 0, 'size': 20})}",
         )
-        items = (payload or {}).get("items", []) if isinstance(payload, dict) else payload or []
-        for item in items:
-            aliases = {value.upper() for value in _CVE_PATTERN.findall(str(item.get("aliases", "")))}
-            if intel.cve_id.upper() in aliases:
-                intel.euvd_id = str(item.get("id")) if item.get("id") else None
-                exploited = item.get("exploitedSince")
-                intel.euvd_exploited_since = str(exploited) if exploited else None
-                return
+        seen = 0
+        for url in attempts:
+            try:
+                payload = _get_json(self._opener, url, timeout=self.timeout)
+            except HTTPError as error:
+                if error.code in {400, 405}:
+                    continue
+                raise
+            items = _euvd_items(payload)
+            seen += len(items)
+            for item in items:
+                aliases = {
+                    value.upper()
+                    for value in _CVE_PATTERN.findall(
+                        f"{item.get('aliases', '')} {item.get('id', '')}"
+                    )
+                }
+                if cve_id in aliases:
+                    intel.euvd_id = str(item.get("id")) if item.get("id") else None
+                    exploited = item.get("exploitedSince")
+                    intel.euvd_exploited_since = str(exploited) if exploited else None
+                    return
+        print(f"EUVD: no record matched {cve_id} ({seen} search results)", file=sys.stderr)
+
+
+def _euvd_items(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("items", "content", "data", "results"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
 
 
 # ------------------------------------------------------------------ CIRCL
