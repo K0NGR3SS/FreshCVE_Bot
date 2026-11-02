@@ -368,3 +368,25 @@ exploitdb_csv_url = "https://gitlab.com/exploit-database/exploitdb/-/raw/main/fi
 epss_url = "https://api.first.org/data/v1/epss"
 # CISA KEV (уже эксплуатируются в реальных атаках) — включено
 kev_url = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+
+# --- Дополнительные бесплатные базы для подробного описания ----------
+# Подключаются только для CVE, по которым уходит сообщение. Любой
+# источник можно отключить, удалив строку или оставив пустую "".
+# Если источник недоступен, сообщение всё равно отправится без его блока.
+
+# CVE.org: описание и решение от вендора (CNA), затронутые версии,
+# CISA Vulnrichment (SSVC) и CVSS, если NVD ещё не посчитал.
+cveorg_url = "https://cveawg.mitre.org/api/cve"
+# GitHub Advisory Database: open-source пакеты и версия с исправлением.
+ghsa_url = "https://api.github.com/advisories"
+# OSV.dev: версии с исправлением по экосистемам и дистрибутивам.
+osv_url = "https://api.osv.dev/v1/vulns"
+# БДУ ФСТЭК: описание и рекомендации на русском (полная XML-выгрузка).
+bdu_url = "https://bdu.fstec.ru/files/documents/vulxml.zip"
+# Сертификат НУЦ Минцифры (Russian Trusted Root CA), которым подписан
+# bdu.fstec.ru. Workflow скачивает его сам; используется только для БДУ.
+bdu_ca_file = "data/russian_trusted_root_ca.pem"
+# EUVD (ENISA): европейский идентификатор и отметка об эксплуатации.
+euvd_url = "https://euvdservices.enisa.europa.eu/api"
+# CIRCL Vulnerability-Lookup: упоминания (sightings) в реальных атаках.
+circl_url = "https://vulnerability.circl.lu/api"

@@ -66,6 +66,10 @@ Edit [`config.toml`](config.toml) to change:
 - Vulnerability keywords and CWE identifiers.
 - Excluded terms, per-run CVE budget, number of exploit matches, GitHub candidate count, and README verification budget.
 - NVD, Exploit-DB, EPSS, and CISA KEV feed URLs.
+- Extra enrichment sources for richer alerts (each optional, leave empty to disable):
+  CVE.org with CISA Vulnrichment (vendor description, solution, SSVC, CVSS fallback),
+  GitHub Advisory Database and OSV.dev (fixed versions), BDU FSTEC (Russian description
+  and remediation), EUVD (ENISA) and CIRCL Vulnerability-Lookup (sightings).
 
 ## Run locally
 
@@ -84,6 +88,8 @@ PYTHONPATH=src python -m cve_signal --cve CVE-2026-12345 --dry-run --format json
 PYTHONPATH=src python -m cve_signal --sources
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
+
+To try the enrichment on a real CVE from GitHub Actions, run the workflow manually with `dry_run` enabled and a CVE ID in the `cve` input.
 
 Dry-run formats are `telegram-html`, `text`, and newline-delimited `json`. Dry runs use an in-memory state database and do not change scheduled monitoring state. `--cve` bypasses the configured interest filter for targeted inspection but is intentionally restricted to dry-run mode.
 
