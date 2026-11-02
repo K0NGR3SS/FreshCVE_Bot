@@ -55,6 +55,12 @@ def main(argv: list[str] | None = None) -> int:
             ("Exploit-DB", config.feeds.exploitdb_csv_url),
             ("EPSS", config.feeds.epss_url),
             ("CISA KEV", config.feeds.kev_url),
+            ("CVE.org + CISA Vulnrichment", config.feeds.cveorg_url),
+            ("GitHub Advisory Database", config.feeds.ghsa_url),
+            ("OSV.dev", config.feeds.osv_url),
+            ("BDU FSTEC", config.feeds.bdu_url),
+            ("EUVD (ENISA)", config.feeds.euvd_url),
+            ("CIRCL Vulnerability-Lookup", config.feeds.circl_url),
             ("GitHub", "https://api.github.com/search/repositories"),
         ):
             print(f"{name}: {value or 'disabled'}")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 import time
 from datetime import timezone
 from typing import Callable, Sequence
@@ -11,6 +12,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from cve_signal.exploits import ExploitMatch, SourceStatus
+from cve_signal.intel import Intel
 from cve_signal.models import CVE
 
 
@@ -98,6 +100,7 @@ def format_alert(
     is_update: bool = False,
     source_statuses: Sequence[SourceStatus] = (),
     explain: bool = False,
+    intel: Intel | None = None,
 ) -> str:
     severity = cve.cvss_severity or "UNSCORED"
     score = f"{cve.cvss_score:.1f}" if cve.cvss_score is not None else "N/A"
@@ -132,6 +135,12 @@ def format_alert(
         blocks.append(
             f"<b>Required action:</b> {html.escape(_truncate(cve.kev_required_action, 240))}"
         )
+
+    if intel is not None:
+        for block in _intel_html_blocks(cve, intel):
+            if _html_length(blocks + ["", block]) > 2900:
+                break
+            blocks.extend(("", block))
 
     if matches:
         label = "New exploit evidence" if is_update else "Exploit evidence"
@@ -186,6 +195,8 @@ def format_alert(
         links.append(
             '<a href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog">CISA KEV</a>'
         )
+    if intel is not None:
+        links.extend(_intel_links(intel))
     if _html_length(blocks + [" · ".join(links)]) <= 3900:
         blocks.extend(("", " · ".join(links)))
 
@@ -218,6 +229,7 @@ def format_alert_text(
     is_update: bool = False,
     source_statuses: Sequence[SourceStatus] = (),
     explain: bool = False,
+    intel: Intel | None = None,
 ) -> str:
     severity = cve.cvss_severity or "UNSCORED"
     score = f"{cve.cvss_score:.1f}" if cve.cvss_score is not None else "N/A"
@@ -236,6 +248,8 @@ def format_alert_text(
         lines.append("Ransomware use: Known")
     if cve.kev_required_action:
         lines.append(f"Required action: {_truncate(cve.kev_required_action, 240)}")
+    if intel is not None:
+        lines.extend(_intel_text_lines(cve, intel))
     if matches:
         lines.append("Exploit evidence:")
         lines.extend(
@@ -255,6 +269,7 @@ def format_alert_json(
     is_update: bool = False,
     source_statuses: Sequence[SourceStatus] = (),
     explain: bool = False,
+    intel: Intel | None = None,
 ) -> str:
     payload = {
         "cve_id": cve.cve_id,
@@ -281,6 +296,7 @@ def format_alert_json(
             "user_interaction": cve.user_interaction,
         },
         "affected": list(cve.affected_ranges or cve.products),
+        "intel": _intel_json(intel),
         "matches": [
             {
                 "title": match.title,
@@ -391,6 +407,119 @@ def _vendor_advisory_url(cve: CVE) -> str | None:
         if parts.scheme in {"http", "https"} and parts.netloc:
             return reference.url
     return None
+
+
+def _intel_fields(cve: CVE, intel: Intel) -> list[tuple[str, str]]:
+    """Ordered (label, plain text) pairs shared by the HTML and text formats."""
+    fields: list[tuple[str, str]] = []
+    if intel.bdu_description:
+        label = f"БДУ ФСТЭК {intel.bdu_id}" if intel.bdu_id else "БДУ ФСТЭК"
+        fields.append((label, _truncate(intel.bdu_description, 450)))
+    if intel.bdu_solution:
+        fields.append(("Устранение (БДУ)", _truncate(intel.bdu_solution, 300)))
+    status_parts = [part for part in (intel.bdu_exploit_status, intel.bdu_fix_status) if part]
+    if status_parts:
+        fields.append(("Статус (БДУ)", _truncate(" · ".join(status_parts), 200)))
+    if intel.vendor_description and _differs(intel.vendor_description, cve.description):
+        fields.append(("Vendor description", _truncate(intel.vendor_description, 450)))
+    if intel.vendor_solution:
+        fields.append(("Vendor solution", _truncate(intel.vendor_solution, 300)))
+    if intel.has_ssvc:
+        parts = []
+        if intel.ssvc_exploitation:
+            parts.append(f"exploitation {intel.ssvc_exploitation}")
+        if intel.ssvc_automatable:
+            parts.append(f"automatable {intel.ssvc_automatable}")
+        if intel.ssvc_technical_impact:
+            parts.append(f"impact {intel.ssvc_technical_impact}")
+        fields.append(("CISA SSVC", " · ".join(parts)))
+    if intel.fixed_versions:
+        fields.append(("Fixed in", _limited_join(intel.fixed_versions, 6, "")))
+    if intel.ghsa:
+        fields.append(
+            ("GitHub Advisory", "; ".join(
+                f"{ghsa_id}{f' — {_truncate(summary, 120)}' if summary else ''}"
+                for ghsa_id, _url, summary in intel.ghsa[:2]
+            ))
+        )
+    if intel.euvd_id:
+        exploited = f" · exploited since {intel.euvd_exploited_since}" if intel.euvd_exploited_since else ""
+        fields.append(("EUVD", f"{intel.euvd_id}{exploited}"))
+    if intel.sightings:
+        fields.append(
+            ("Sightings (CIRCL)", " · ".join(
+                f"{kind} {count}"
+                for kind, count in sorted(intel.sightings.items(), key=lambda item: -item[1])
+            ))
+        )
+    return fields
+
+
+def _differs(left: str, right: str) -> bool:
+    return _normalized_text(left) != _normalized_text(right)
+
+
+def _normalized_text(value: str) -> str:
+    return re.sub(r"\W+", " ", value).strip().lower()
+
+
+def _intel_html_blocks(cve: CVE, intel: Intel) -> list[str]:
+    return [
+        f"<b>{html.escape(label)}:</b> {html.escape(value)}"
+        for label, value in _intel_fields(cve, intel)
+    ]
+
+
+def _intel_text_lines(cve: CVE, intel: Intel) -> list[str]:
+    return [f"{label}: {value}" for label, value in _intel_fields(cve, intel)]
+
+
+def _intel_links(intel: Intel) -> list[str]:
+    links = []
+    if intel.ghsa and intel.ghsa[0][1].startswith("https://"):
+        links.append(f'<a href="{html.escape(intel.ghsa[0][1], quote=True)}">GHSA</a>')
+    if intel.bdu_id:
+        number = intel.bdu_id.split(":", 1)[-1]
+        links.append(f'<a href="https://bdu.fstec.ru/vul/{html.escape(number, quote=True)}">БДУ</a>')
+    if intel.euvd_id:
+        links.append(
+            f'<a href="https://euvd.enisa.europa.eu/vulnerability/{html.escape(intel.euvd_id, quote=True)}">EUVD</a>'
+        )
+    if intel.sightings or intel.vendor_description:
+        links.append(
+            f'<a href="https://vulnerability.circl.lu/vuln/{html.escape(intel.cve_id, quote=True)}">CIRCL</a>'
+        )
+    return links
+
+
+def _intel_json(intel: Intel | None) -> dict | None:
+    if intel is None:
+        return None
+    return {
+        "vendor_description": intel.vendor_description,
+        "vendor_solution": intel.vendor_solution,
+        "vendor_affected": intel.vendor_affected,
+        "ssvc": {
+            "exploitation": intel.ssvc_exploitation,
+            "automatable": intel.ssvc_automatable,
+            "technical_impact": intel.ssvc_technical_impact,
+        },
+        "fixed_versions": intel.fixed_versions,
+        "ghsa": [{"id": a, "url": b, "summary": c} for a, b, c in intel.ghsa],
+        "bdu": {
+            "id": intel.bdu_id,
+            "description": intel.bdu_description,
+            "solution": intel.bdu_solution,
+            "exploit_status": intel.bdu_exploit_status,
+            "fix_status": intel.bdu_fix_status,
+        },
+        "euvd": {"id": intel.euvd_id, "exploited_since": intel.euvd_exploited_since},
+        "sightings": intel.sightings,
+        "sources": [
+            {"source": status.source, "state": status.state, "detail": status.detail}
+            for status in intel.statuses
+        ],
+    }
 
 
 def _html_length(blocks: Sequence[str]) -> int:

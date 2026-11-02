@@ -17,6 +17,7 @@ from cve_signal.exploits import (
 )
 from cve_signal.filtering import is_interesting, passes_alert_gate
 from cve_signal.github_pocs import GitHubPoCClient
+from cve_signal.intel import Intel, IntelCollector
 from cve_signal.kev import KEVClient, KEVEntry
 from cve_signal.models import CVE
 from cve_signal.nvd import NVDClient
@@ -59,6 +60,7 @@ def run_scan(
     cve_ids: tuple[str, ...] = (),
     output_format: str = "telegram-html",
     explain: bool = False,
+    intel_collector: IntelCollector | None = None,
 ) -> ScanResult:
     end = now or datetime.now(timezone.utc)
     if end.tzinfo is None:
@@ -75,6 +77,7 @@ def run_scan(
         oldest_allowed = since
 
     nvd = nvd_client or NVDClient(config.feeds.nvd_url)
+    intel_source = intel_collector or IntelCollector.from_feeds(config.feeds)
     if cve_ids:
         cves = [
             cve
@@ -168,6 +171,9 @@ def run_scan(
                 epss_status = SourceStatus("EPSS", "unavailable", str(error))
                 print(f"EPSS enrichment unavailable: {error}", file=sys.stderr)
 
+        if intel_source is not None:
+            due = [_with_record_cvss(cve, intel_source) for cve in due]
+
         candidates: list[CVE] = []
         for cve in due:
             if (
@@ -196,6 +202,11 @@ def run_scan(
             candidate_limit=config.scan.github_candidates,
             readme_limit=config.scan.github_readme_checks,
         )
+        intel_by_id: dict[str, Intel] = {}
+        if intel_source is not None:
+            fresh = [cve.cve_id for cve in candidates if not state.was_notified(cve.cve_id)]
+            if fresh:
+                intel_by_id = intel_source.collect(fresh)
         telegram = None if dry_run else telegram_factory()
         notified = 0
         source_failures = 0
@@ -245,6 +256,7 @@ def run_scan(
                 is_update=was_notified,
                 source_statuses=statuses,
                 explain=explain,
+                intel=intel_by_id.get(cve.cve_id) if not was_notified else None,
             )
             if dry_run:
                 print(message)
@@ -322,6 +334,34 @@ def _find_exploits(
         key=lambda item: (confidence_order[item.confidence], -item.score, item.title),
     )[:limit]
     return EnrichmentResult(ranked, tuple(statuses))
+
+
+def _with_record_cvss(cve: CVE, collector: IntelCollector) -> CVE:
+    # NVD often lags behind; use the CVSS from the CVE record (CNA or CISA
+    # Vulnrichment) for KEV entries that NVD has not scored yet.
+    if cve.cvss_score is not None or not cve.known_exploited:
+        return cve
+    fallback = collector.record_cvss(cve.cve_id)
+    if fallback is None:
+        return cve
+    score, severity, version, vector = fallback
+    return replace(
+        cve,
+        cvss_score=score,
+        cvss_severity=severity or _severity_from_score(score),
+        cvss_version=version,
+        cvss_vector=vector,
+    )
+
+
+def _severity_from_score(score: float) -> str:
+    if score >= 9.0:
+        return "CRITICAL"
+    if score >= 7.0:
+        return "HIGH"
+    if score >= 4.0:
+        return "MEDIUM"
+    return "LOW" if score > 0 else "NONE"
 
 
 def _apply_kev(cve: CVE, entry: KEVEntry | None) -> CVE:

@@ -38,6 +38,13 @@ class FeedConfig:
     exploitdb_csv_url: str
     epss_url: str | None = None
     kev_url: str | None = None
+    cveorg_url: str | None = None
+    ghsa_url: str | None = None
+    osv_url: str | None = None
+    bdu_url: str | None = None
+    bdu_ca_file: str | None = None
+    euvd_url: str | None = None
+    circl_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +89,18 @@ def load_config(path: Path) -> AppConfig:
             exploitdb_csv_url=str(feeds["exploitdb_csv_url"]),
             epss_url=str(feeds["epss_url"]) if feeds.get("epss_url") else None,
             kev_url=str(feeds["kev_url"]) if feeds.get("kev_url") else None,
+            **{
+                key: str(feeds[key]) if feeds.get(key) else None
+                for key in (
+                    "cveorg_url",
+                    "ghsa_url",
+                    "osv_url",
+                    "bdu_url",
+                    "bdu_ca_file",
+                    "euvd_url",
+                    "circl_url",
+                )
+            },
         ),
     )
     _validate(config)
