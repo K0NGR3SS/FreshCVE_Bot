@@ -57,6 +57,10 @@ Enable Actions in your fork and run the **CVE Signal** workflow manually with `d
 Edit [`config.toml`](config.toml) to change:
 
 - CVSS range and maximum CVE age.
+- `severities` (e.g. `["HIGH", "CRITICAL"]`); CISA KEV entries always pass.
+- `all_products = true` to alert on every product in NVD, ignoring the keyword and CWE lists.
+- `alert_gate` (`any`, `all`, `kev`, `epss`, `off`) with `minimum_epss` (e.g. `0.20` = 20%) to alert only on CVEs listed in CISA KEV and/or above an EPSS threshold; gated CVEs keep being rechecked until `monitoring_days` expires.
+- `published_since = "YYYY-MM-DD"` to include every CVE published on or after that date.
 - Monitoring duration and early/later recheck intervals.
 - Cloud providers and web technologies.
 - Vulnerability keywords and CWE identifiers.

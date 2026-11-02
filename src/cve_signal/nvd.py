@@ -28,6 +28,8 @@ class NVDClient:
         self.api_key = api_key or os.getenv("NVD_API_KEY")
         self.timeout = timeout
         self._opener = opener or _open_request
+        self.max_attempts = 7
+        self.backoff = opener is None
 
     def fetch_modified(self, start: datetime, end: datetime) -> list[CVE]:
         start = _as_utc(start)
@@ -76,18 +78,20 @@ class NVDClient:
             headers["apiKey"] = self.api_key
         request = Request(url, headers=headers)
 
-        for attempt in range(3):
+        attempts = self.max_attempts
+        for attempt in range(attempts):
             try:
                 return json.loads(self._opener(request, self.timeout))
             except HTTPError as error:
-                if error.code != 429 and error.code < 500:
+                if error.code not in {403, 429} and error.code < 500:
                     raise
-                if attempt == 2:
+                if attempt == attempts - 1:
                     raise
-            except URLError:
-                if attempt == 2:
+            except (URLError, TimeoutError):
+                if attempt == attempts - 1:
                     raise
-            time.sleep(2**attempt)
+            # NVD often returns 503/403 under load: back off up to ~1 minute.
+            time.sleep(min(5 * 2**attempt, 60) if self.backoff else 0)
         raise RuntimeError("NVD request retry loop exited unexpectedly")
 
 

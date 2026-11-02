@@ -3,8 +3,10 @@ from __future__ import annotations
 import html
 import json
 import os
+import time
 from datetime import timezone
 from typing import Callable, Sequence
+from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
@@ -23,6 +25,7 @@ class TelegramClient:
         *,
         timeout: float = 30.0,
         sender: TelegramSender | None = None,
+        min_interval: float = 3.1,
     ) -> None:
         if not token or not chat_id:
             raise ValueError("Telegram token and chat ID are required")
@@ -30,6 +33,8 @@ class TelegramClient:
         self._chat_id = chat_id
         self.timeout = timeout
         self._sender = sender or _send_request
+        # Telegram allows ~20 messages per minute in a channel.
+        self.min_interval = min_interval if sender is None else 0.0
 
     @classmethod
     def from_environment(cls) -> TelegramClient:
@@ -62,7 +67,23 @@ class TelegramClient:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             method="POST",
         )
-        response = json.loads(self._sender(request, self.timeout))
+        response: dict = {}
+        for _attempt in range(5):
+            try:
+                response = json.loads(self._sender(request, self.timeout))
+            except HTTPError as error:
+                if error.code != 429:
+                    raise
+                try:
+                    response = json.loads(error.read() or b"{}")
+                except ValueError:
+                    response = {}
+            retry_after = (response.get("parameters") or {}).get("retry_after")
+            if response.get("ok") or response.get("error_code") != 429:
+                break
+            time.sleep(min(float(retry_after or 5), 120) + 1)
+        if self.min_interval:
+            time.sleep(self.min_interval)
         if not response.get("ok"):
             description = response.get("description", "unknown error")
             raise RuntimeError(f"Telegram rejected the message: {description}")
@@ -88,13 +109,7 @@ def format_alert(
     nvd_url = f"https://nvd.nist.gov/vuln/detail/{cve.cve_id}"
 
     icon = "🔎" if is_update else "🚨"
-    risk_parts = [f"CVSS {score}"]
-    if cve.known_exploited:
-        risk_parts.append("CISA KEV")
-    if cve.epss_score is not None:
-        risk_parts.append(f"EPSS {cve.epss_score * 100:.1f}%")
-    if cve.epss_percentile is not None:
-        risk_parts.append(f"{cve.epss_percentile * 100:.0f}th pct")
+    risk_parts = [f"CVSS {score}", _kev_text(cve), _epss_text(cve)]
 
     blocks = [
         f"{icon} <b>{html.escape(severity)} · {html.escape(headline)}</b>",
@@ -180,6 +195,22 @@ def format_alert(
     return message
 
 
+def _kev_text(cve: CVE) -> str:
+    if cve.known_exploited:
+        added = f" (added {cve.kev_date_added})" if cve.kev_date_added else ""
+        return f"CISA KEV: YES{added}"
+    return "CISA KEV: no"
+
+
+def _epss_text(cve: CVE) -> str:
+    if cve.epss_score is None:
+        return "EPSS: n/a"
+    text = f"EPSS: {cve.epss_score * 100:.1f}%"
+    if cve.epss_percentile is not None:
+        text += f" ({cve.epss_percentile * 100:.0f}th pct)"
+    return text
+
+
 def format_alert_text(
     cve: CVE,
     matches: list[ExploitMatch],
@@ -197,16 +228,14 @@ def format_alert_text(
         f"Attack: {_attack_text(cve)}",
         f"Affected: {_affected_text(cve)}",
     ]
-    if cve.known_exploited:
-        lines.append("CISA KEV: yes")
+    lines.append(_kev_text(cve))
+    lines.append(_epss_text(cve))
     if cve.kev_due_date:
         lines.append(f"KEV due: {cve.kev_due_date}")
     if cve.known_ransomware_use and cve.known_ransomware_use.lower() == "known":
         lines.append("Ransomware use: Known")
     if cve.kev_required_action:
         lines.append(f"Required action: {_truncate(cve.kev_required_action, 240)}")
-    if cve.epss_score is not None:
-        lines.append(f"EPSS: {cve.epss_score * 100:.1f}%")
     if matches:
         lines.append("Exploit evidence:")
         lines.extend(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 import tomllib
 
@@ -22,6 +23,13 @@ class ScanConfig:
     github_candidates: int = 50
     github_readme_checks: int = 10
     maximum_cves_per_run: int = 25
+    all_products: bool = False
+    published_since: date | None = None
+    severities: frozenset[str] = frozenset()
+    # Alert gate: "off" (no gate), "any" (KEV or EPSS >= minimum_epss),
+    # "all" (KEV and EPSS >= minimum_epss), "kev" (KEV only), "epss" (EPSS only).
+    alert_gate: str = "off"
+    minimum_epss: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -61,6 +69,13 @@ def load_config(path: Path) -> AppConfig:
             github_candidates=int(scan.get("github_candidates", 50)),
             github_readme_checks=int(scan.get("github_readme_checks", 10)),
             maximum_cves_per_run=int(scan.get("maximum_cves_per_run", 25)),
+            all_products=bool(scan.get("all_products", False)),
+            published_since=_parse_date(scan.get("published_since")),
+            alert_gate=str(scan.get("alert_gate", "off")).lower(),
+            minimum_epss=float(scan.get("minimum_epss", 0.0)),
+            severities=frozenset(
+                str(value).upper() for value in scan.get("severities", ())
+            ),
         ),
         feeds=FeedConfig(
             nvd_url=str(feeds["nvd_url"]),
@@ -71,6 +86,14 @@ def load_config(path: Path) -> AppConfig:
     )
     _validate(config)
     return config
+
+
+def _parse_date(value: object) -> date | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
 
 
 def _validate(config: AppConfig) -> None:
@@ -93,6 +116,13 @@ def _validate(config: AppConfig) -> None:
         )
     if scan.maximum_cves_per_run <= 0:
         raise ValueError("maximum_cves_per_run must be positive")
+    if scan.alert_gate not in {"off", "any", "all", "kev", "epss"}:
+        raise ValueError("alert_gate must be off, any, all, kev or epss")
+    if not 0.0 <= scan.minimum_epss <= 1.0:
+        raise ValueError("minimum_epss must be between 0 and 1 (0.2 = 20%)")
+    allowed_severities = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+    if not scan.severities <= allowed_severities:
+        raise ValueError("severities must be LOW, MEDIUM, HIGH or CRITICAL")
     malformed_cwes = [value for value in scan.web_cwes if not value.startswith("CWE-")]
     if malformed_cwes:
         raise ValueError("web_cwes entries must start with CWE-")

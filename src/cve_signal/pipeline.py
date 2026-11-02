@@ -15,7 +15,7 @@ from cve_signal.exploits import (
     SourceStatus,
     canonicalize_url,
 )
-from cve_signal.filtering import is_interesting
+from cve_signal.filtering import is_interesting, passes_alert_gate
 from cve_signal.github_pocs import GitHubPoCClient
 from cve_signal.kev import KEVClient, KEVEntry
 from cve_signal.models import CVE
@@ -66,6 +66,13 @@ def run_scan(
     hours = lookback_hours or config.scan.lookback_hours
     start = end - timedelta(hours=hours)
     oldest_allowed = end - timedelta(hours=config.scan.maximum_cve_age_hours)
+    if config.scan.published_since is not None:
+        since = datetime.combine(
+            config.scan.published_since, datetime.min.time(), tzinfo=timezone.utc
+        )
+        # Every CVE published on or after the configured date is eligible,
+        # regardless of maximum_cve_age_hours.
+        oldest_allowed = since
 
     nvd = nvd_client or NVDClient(config.feeds.nvd_url)
     if cve_ids:
@@ -127,29 +134,62 @@ def run_scan(
                     ),
                 )
 
-        candidates = state.due_monitored(
-            end, limit=config.scan.maximum_cves_per_run
+        gated = config.scan.alert_gate != "off" and not explicit_ids
+        due = state.due_monitored(
+            end, limit=None if gated else config.scan.maximum_cves_per_run
         )
 
-        if not candidates:
+        if not due:
             return ScanResult(fetched=len(cves), matched=0, notified=0)
+
+        # KEV status for every due CVE (not only entries added this window),
+        # so a monitored CVE is picked up as soon as CISA adds it.
+        if gated and config.feeds.kev_url and kev_status is not None:
+            if kev_status.state == "ok":
+                fetch_all = getattr(kev, "fetch_all", None)
+                catalog = fetch_all() if callable(fetch_all) else kev_entries
+                due = [_apply_kev(cve, catalog.get(cve.cve_id)) for cve in due]
 
         epss_status: SourceStatus | None = None
         if config.feeds.epss_url:
             epss = epss_client or EPSSClient(config.feeds.epss_url)
             try:
-                scores = epss.fetch_scores([cve.cve_id for cve in candidates])
-                candidates = [
+                scores = epss.fetch_scores([cve.cve_id for cve in due])
+                due = [
                     replace(
                         cve,
                         epss_score=scores.get(cve.cve_id, (None, None))[0],
                         epss_percentile=scores.get(cve.cve_id, (None, None))[1],
                     )
-                    for cve in candidates
+                    for cve in due
                 ]
                 epss_status = SourceStatus("EPSS", "ok")
             except (OSError, ValueError, KeyError) as error:
                 epss_status = SourceStatus("EPSS", "unavailable", str(error))
+                print(f"EPSS enrichment unavailable: {error}", file=sys.stderr)
+
+        candidates: list[CVE] = []
+        for cve in due:
+            if (
+                gated
+                and not state.was_notified(cve.cve_id)
+                and not passes_alert_gate(cve, config.scan)
+            ):
+                # Not enough exploitation signal yet: keep watching it so a
+                # later EPSS rise or KEV listing still triggers an alert.
+                if not dry_run:
+                    state.schedule_next_check(
+                        cve,
+                        end,
+                        early_hours=config.scan.early_recheck_hours,
+                        later_hours=config.scan.later_recheck_hours,
+                    )
+                continue
+            candidates.append(cve)
+        candidates = candidates[: config.scan.maximum_cves_per_run]
+
+        if not candidates:
+            return ScanResult(fetched=len(cves), matched=0, notified=0)
 
         exploits = exploit_client or ExploitDBClient(config.feeds.exploitdb_csv_url)
         github = github_client or GitHubPoCClient(

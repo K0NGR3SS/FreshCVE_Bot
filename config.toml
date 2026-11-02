@@ -1,58 +1,62 @@
 # =====================================================================
 #  FreshCVE_Bot / CVE-SIGNAL — конфиг "весь софт, HIGH + CRITICAL"
-#  Старт мониторинга: 02.11.2026. Источники: NVD + CISA KEV + EPSS
-#  + поиск публичных эксплойтов (Exploit-DB, GitHub).
+#  Все уязвимости, опубликованные начиная с 02.11.2026.
+#  Источники: NVD + CISA KEV + EPSS + поиск эксплойтов (Exploit-DB, GitHub).
 # =====================================================================
- 
+
 [scan]
-# Первый запуск заглядывает на 24 часа назад, т.е. захватывает
-# все CVE, опубликованные/обновлённые с 02.11.2026. Дальше бот идёт
-# по расписанию каждые 3 часа, а уже отправленные CVE повторно
-# не шлёт (они помнятся в data/state.sqlite3).
+# Брать ВСЕ CVE, опубликованные с этой даты (UTC). Ограничение
+# maximum_cve_age_hours для них не действует.
+published_since = "2026-11-02"
+
+# ВЕСЬ софт из NVD: списки technology_keywords / vulnerability_keywords /
+# web_cwes ниже игнорируются, работают только severity/CVSS, KEV и
+# exclude_keywords. Поставьте false, чтобы фильтровать по вендорам
+# (Bitrix, Microsoft и т.д. — списки оставлены ниже).
+all_products = true
+
+# Окно запроса к NVD на каждый запуск (запуски каждые 3 часа, перекрытие
+# защищает от пропусков; повторно уже отправленные CVE не шлются).
 lookback_hours = 24
 maximum_cve_age_hours = 48
- 
-# Severity: HIGH (7.0–8.9) и CRITICAL (9.0–10.0) по CVSS.
-# CVE из каталога CISA KEV приходят ВСЕГДА, независимо от CVSS.
+
+# Severity: только HIGH и CRITICAL (по NVD/CVSS). При включённом
+# alert_gate это строгое условие и для CVE из CISA KEV.
+severities = ["HIGH", "CRITICAL"]
 minimum_cvss = 7.0
 maximum_cvss = 10.0
- 
+
+# Фильтр по признакам эксплуатации (сообщение уходит, только если он пройден):
+#   "any"  — CVE в CISA KEV ИЛИ EPSS >= minimum_epss                    
+#   "all"  — CVE в CISA KEV И  EPSS >= minimum_epss    (выбрано)
+#   "kev"  — только CISA KEV;  "epss" — только EPSS;  "off" — без фильтра
+# CVE, не прошедшие фильтр, бот продолжает отслеживать monitoring_days дней
+# и пришлёт сообщение, как только EPSS вырастет или CVE попадёт в KEV.
+# У свежих CVE EPSS появляется обычно через ~сутки после публикации.
+alert_gate = "all"   # HIGH/CRITICAL И CISA KEV И EPSS >= 20%
+minimum_epss = 0.20   # 0.20 = 20%
+
 maximum_exploit_matches = 5
- 
+
 # Следить за найденной CVE 30 дней: первые 48 часов каждые 3 часа,
 # потом раз в сутки (если появится PoC — бот ответит на своё сообщение).
 monitoring_days = 30
 early_recheck_hours = 3
 later_recheck_hours = 24
- 
-# Лимиты на один запуск. Для "всего софта" поток больше обычного,
-# поэтому лимит поднят. Не ставьте выше ~50: упрётесь в 15-минутный
-# таймаут GitHub Actions и лимиты поиска GitHub.
-github_candidates = 50
-github_readme_checks = 10
-maximum_cves_per_run = 40
- 
+
+# Лимиты на один запуск (увеличены). Бот сам выдерживает лимиты
+# Telegram (~20 сообщений/мин) и GitHub Search (30 запросов/мин);
+# таймаут job в GitHub Actions поднят до 120 минут.
+github_candidates = 100
+github_readme_checks = 15
+maximum_cves_per_run = 200
+
 # ---------------------------------------------------------------------
-# Фильтр: CVE проходит, если совпало хотя бы одно слово из
-# technology_keywords И хотя бы одно из vulnerability_keywords / web_cwes
-# (или CVE есть в CISA KEV). Ищется по описанию CVE и по CPE-продуктам.
+# Используются только при all_products = false.
+# CVE проходит, если совпало хотя бы одно слово из technology_keywords
+# И хотя бы одно из vulnerability_keywords / web_cwes (или CVE в CISA KEV).
 # ---------------------------------------------------------------------
 technology_keywords = [
-  # --- УНИВЕРСАЛЬНЫЙ ПЕРЕХВАТ: "весь софт" -------------------------
-  # Эти слова есть почти в каждом описании NVD, поэтому вместе с
-  # ними бот ловит HIGH/CRITICAL по ЛЮБОМУ продукту.
-  # Хотите получать только вендоров из списка ниже — удалите этот блок.
-  "version",
-  "versions",
-  "software",
-  "application",
-  "firmware",
-  "device",
-  "plugin",
-  "library",
-  "component",
-  "module",
- 
   # --- Microsoft ----------------------------------------------------
   "microsoft",
   "windows",
@@ -73,7 +77,7 @@ technology_keywords = [
   "smb",
   "kerberos",
   "ntlm",
- 
+
   # --- Российский софт ---------------------------------------------
   "bitrix",
   "1c-bitrix",
@@ -87,7 +91,7 @@ technology_keywords = [
   "yandex",
   "mail.ru",
   "vk",
- 
+
   # --- ОС и ядро ---------------------------------------------------
   "linux kernel",
   "linux",
@@ -107,7 +111,7 @@ technology_keywords = [
   "openssh",
   "openssl",
   "busybox",
- 
+
   # --- Браузеры ----------------------------------------------------
   "google chrome",
   "chromium",
@@ -116,7 +120,7 @@ technology_keywords = [
   "safari",
   "webkit",
   "opera",
- 
+
   # --- Сетевое оборудование и безопасность -------------------------
   "cisco",
   "fortinet",
@@ -144,7 +148,7 @@ technology_keywords = [
   "watchguard",
   "openvpn",
   "wireguard",
- 
+
   # --- Виртуализация, бэкап, хранилища -----------------------------
   "vmware",
   "vcenter",
@@ -155,7 +159,7 @@ technology_keywords = [
   "qnap",
   "synology",
   "netapp",
- 
+
   # --- Корпоративный софт ------------------------------------------
   "oracle",
   "weblogic",
@@ -192,7 +196,7 @@ technology_keywords = [
   "amd",
   "nvidia",
   "qualcomm",
- 
+
   # --- Базы данных и брокеры ---------------------------------------
   "postgresql",
   "mysql",
@@ -203,7 +207,7 @@ technology_keywords = [
   "apache kafka",
   "clickhouse",
   "sqlite",
- 
+
   # --- Веб, CMS, языки, фреймворки (было в исходном конфиге + больше)
   "apache",
   "apache http server",
@@ -242,7 +246,7 @@ technology_keywords = [
   "jenkins",
   "gitea",
   "sonarqube",
- 
+
   # --- Облака и контейнеры -----------------------------------------
   "amazon web services",
   "aws",
@@ -257,7 +261,7 @@ technology_keywords = [
   "istio",
   "terraform",
   "cloud foundry",
- 
+
   # --- Промышленные системы (ICS / SCADA) --------------------------
   "siemens",
   "schneider electric",
@@ -268,21 +272,8 @@ technology_keywords = [
   "scada",
   "plc",
 ]
- 
+
 vulnerability_keywords = [
-  # Универсальные слова: есть почти в каждом описании CVE.
-  # Вместе с порогом CVSS ≥ 7.0 дают "все HIGH и CRITICAL".
-  "vulnerability",
-  "vulnerable",
-  "attacker",
-  "flaw",
-  "issue",
-  "allows",
-  "allow",
-  "could",
-  "dos",
- 
-  # Конкретные классы (для точности, если универсальные удалите)
   "authentication bypass",
   "authorization bypass",
   "buffer overflow",
@@ -323,7 +314,7 @@ vulnerability_keywords = [
   "spoofing",
   "zero-day",
 ]
- 
+
 # CWE-коды (ловят CVE даже без ключевых слов в описании).
 web_cwes = [
   "CWE-20",   # Improper Input Validation
@@ -365,11 +356,11 @@ web_cwes = [
   "CWE-918",  # SSRF
   "CWE-1321", # Prototype Pollution
 ]
- 
+
 # Слова-исключения: CVE с ними НЕ будут присылаться.
 # Пример: ["wordpress plugin"], если надоест поток плагинов WordPress.
 exclude_keywords = []
- 
+
 [feeds]
 nvd_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 exploitdb_csv_url = "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"

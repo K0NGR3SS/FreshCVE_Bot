@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,7 +8,7 @@ import unittest
 from urllib.parse import parse_qs, urlsplit
 
 from cve_signal.config import ScanConfig
-from cve_signal.filtering import is_interesting
+from cve_signal.filtering import is_interesting, passes_alert_gate
 from cve_signal.models import CVE, Reference
 from cve_signal.nvd import NVDClient, parse_cve
 from cve_signal.state import StateStore
@@ -169,6 +170,53 @@ class FilteringTests(unittest.TestCase):
         cve = CVE(**{**original.__dict__, "cvss_score": None})
 
         self.assertTrue(is_interesting(cve, scan_config()))
+
+    def test_all_products_ignores_keyword_lists(self) -> None:
+        original = parse_cve(NVD_FIXTURE)
+        cve = replace(
+            original,
+            description="Bitrix24 crashes on crafted input.",
+            products=("1c-bitrix:bitrix24",),
+            cwes=(),
+            known_exploited=False,
+        )
+        self.assertFalse(is_interesting(cve, scan_config()))
+        config = replace(scan_config(), all_products=True)
+        self.assertTrue(is_interesting(cve, config))
+
+    def test_alert_gate_modes(self) -> None:
+        base = replace(parse_cve(NVD_FIXTURE), known_exploited=False, epss_score=None)
+        kev = replace(base, known_exploited=True)
+        hot = replace(base, epss_score=0.25)
+        both = replace(base, known_exploited=True, epss_score=0.25)
+        any_gate = replace(scan_config(), alert_gate="any", minimum_epss=0.2)
+        all_gate = replace(any_gate, alert_gate="all")
+        self.assertFalse(passes_alert_gate(base, any_gate))
+        self.assertTrue(passes_alert_gate(kev, any_gate))
+        self.assertTrue(passes_alert_gate(hot, any_gate))
+        self.assertFalse(passes_alert_gate(hot, all_gate))
+        self.assertFalse(passes_alert_gate(replace(base, epss_score=0.19), any_gate))
+        self.assertTrue(passes_alert_gate(both, all_gate))
+        strict = replace(all_gate, severities=frozenset({"HIGH", "CRITICAL"}))
+        self.assertTrue(passes_alert_gate(replace(both, cvss_severity="HIGH"), strict))
+        self.assertFalse(
+            passes_alert_gate(replace(both, cvss_severity="MEDIUM"), strict)
+        )
+
+    def test_severity_filter_keeps_only_listed_levels(self) -> None:
+        original = parse_cve(NVD_FIXTURE)
+        config = replace(
+            scan_config(),
+            all_products=True,
+            minimum_cvss=0.0,
+            severities=frozenset({"HIGH", "CRITICAL"}),
+        )
+        medium = replace(original, cvss_severity="MEDIUM", known_exploited=False)
+        critical = replace(original, cvss_severity="CRITICAL", known_exploited=False)
+        kev_medium = replace(original, cvss_severity="MEDIUM", known_exploited=True)
+        self.assertFalse(is_interesting(medium, config))
+        self.assertTrue(is_interesting(critical, config))
+        self.assertTrue(is_interesting(kev_medium, config))
 
     def test_rejects_unrelated_technology(self) -> None:
         cve = CVE(
