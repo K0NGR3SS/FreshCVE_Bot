@@ -1,90 +1,379 @@
+# =====================================================================
+#  FreshCVE_Bot / CVE-SIGNAL — конфиг "весь софт, HIGH + CRITICAL"
+#  Старт мониторинга: 02.11.2026. Источники: NVD + CISA KEV + EPSS
+#  + поиск публичных эксплойтов (Exploit-DB, GitHub).
+# =====================================================================
+ 
 [scan]
-lookback_hours = 6
-# Initial discovery window. Once selected, a CVE remains in the monitoring queue below.
+# Первый запуск заглядывает на 24 часа назад, т.е. захватывает
+# все CVE, опубликованные/обновлённые с 02.11.2026. Дальше бот идёт
+# по расписанию каждые 3 часа, а уже отправленные CVE повторно
+# не шлёт (они помнятся в data/state.sqlite3).
+lookback_hours = 24
 maximum_cve_age_hours = 48
+ 
+# Severity: HIGH (7.0–8.9) и CRITICAL (9.0–10.0) по CVSS.
+# CVE из каталога CISA KEV приходят ВСЕГДА, независимо от CVSS.
 minimum_cvss = 7.0
 maximum_cvss = 10.0
+ 
 maximum_exploit_matches = 5
-# Recheck selected CVEs every 3 hours for 48 hours, then daily for 30 days.
+ 
+# Следить за найденной CVE 30 дней: первые 48 часов каждые 3 часа,
+# потом раз в сутки (если появится PoC — бот ответит на своё сообщение).
 monitoring_days = 30
 early_recheck_hours = 3
 later_recheck_hours = 24
-# Bound API usage per workflow run and per GitHub search.
+ 
+# Лимиты на один запуск. Для "всего софта" поток больше обычного,
+# поэтому лимит поднят. Не ставьте выше ~50: упрётесь в 15-минутный
+# таймаут GitHub Actions и лимиты поиска GitHub.
 github_candidates = 50
 github_readme_checks = 10
-maximum_cves_per_run = 25
-
-# A CVE must match at least one technology and one vulnerability signal.
+maximum_cves_per_run = 40
+ 
+# ---------------------------------------------------------------------
+# Фильтр: CVE проходит, если совпало хотя бы одно слово из
+# technology_keywords И хотя бы одно из vulnerability_keywords / web_cwes
+# (или CVE есть в CISA KEV). Ищется по описанию CVE и по CPE-продуктам.
+# ---------------------------------------------------------------------
 technology_keywords = [
-  "amazon web services",
-  "akamai",
-  "amazon elastic kubernetes service",
-  "aws",
+  # --- УНИВЕРСАЛЬНЫЙ ПЕРЕХВАТ: "весь софт" -------------------------
+  # Эти слова есть почти в каждом описании NVD, поэтому вместе с
+  # ними бот ловит HIGH/CRITICAL по ЛЮБОМУ продукту.
+  # Хотите получать только вендоров из списка ниже — удалите этот блок.
+  "version",
+  "versions",
+  "software",
+  "application",
+  "firmware",
+  "device",
+  "plugin",
+  "library",
+  "component",
+  "module",
+ 
+  # --- Microsoft ----------------------------------------------------
+  "microsoft",
+  "windows",
+  "windows server",
+  "active directory",
+  "exchange server",
+  "sharepoint",
+  "office",
+  "outlook",
+  "edge",
+  "hyper-v",
   "azure",
-  "caddy",
-  "cloudflare",
-  "cloud foundry",
-  "docker",
-  "drupal",
-  "envoy",
-  "fastly",
-  "github enterprise",
-  "gitlab",
-  "google cloud",
-  "google cloud platform",
-  "kubernetes",
-  "haproxy",
-  "istio",
-  "jenkins",
-  "joomla",
-  "nginx",
-  "node.js",
-  "openshift",
+  "sql server",
+  ".net",
+  "visual studio",
+  "iis",
+  "rdp",
+  "smb",
+  "kerberos",
+  "ntlm",
+ 
+  # --- Российский софт ---------------------------------------------
+  "bitrix",
+  "1c-bitrix",
+  "bitrix24",
+  "1c",
+  "1c:enterprise",
+  "kaspersky",
+  "astra linux",
+  "red os",
+  "alt linux",
+  "yandex",
+  "mail.ru",
+  "vk",
+ 
+  # --- ОС и ядро ---------------------------------------------------
+  "linux kernel",
+  "linux",
+  "apple",
+  "macos",
+  "ios",
+  "android",
+  "freebsd",
+  "ubuntu",
+  "debian",
+  "red hat",
+  "suse",
+  "centos",
+  "glibc",
+  "systemd",
+  "sudo",
+  "openssh",
+  "openssl",
+  "busybox",
+ 
+  # --- Браузеры ----------------------------------------------------
+  "google chrome",
+  "chromium",
+  "firefox",
+  "mozilla",
+  "safari",
+  "webkit",
+  "opera",
+ 
+  # --- Сетевое оборудование и безопасность -------------------------
+  "cisco",
+  "fortinet",
+  "fortios",
+  "fortigate",
+  "palo alto",
+  "pan-os",
+  "juniper",
+  "check point",
+  "sonicwall",
+  "citrix",
+  "netscaler",
+  "ivanti",
+  "f5",
+  "big-ip",
+  "mikrotik",
+  "routeros",
+  "zyxel",
+  "tp-link",
+  "d-link",
+  "netgear",
+  "huawei",
+  "ubiquiti",
+  "sophos",
+  "watchguard",
+  "openvpn",
+  "wireguard",
+ 
+  # --- Виртуализация, бэкап, хранилища -----------------------------
+  "vmware",
+  "vcenter",
+  "esxi",
+  "proxmox",
+  "veeam",
+  "virtualbox",
+  "qnap",
+  "synology",
+  "netapp",
+ 
+  # --- Корпоративный софт ------------------------------------------
+  "oracle",
+  "weblogic",
+  "sap",
+  "ibm",
+  "atlassian",
+  "confluence",
+  "jira",
+  "zimbra",
+  "adobe",
+  "acrobat",
+  "zoom",
+  "teamviewer",
+  "anydesk",
+  "solarwinds",
+  "moveit",
+  "progress",
+  "connectwise",
+  "screenconnect",
+  "zabbix",
+  "grafana",
+  "elasticsearch",
+  "kibana",
+  "splunk",
+  "papercut",
+  "manageengine",
+  "zoho",
+  "veritas",
+  "dell",
+  "hp",
+  "hpe",
+  "lenovo",
+  "intel",
+  "amd",
+  "nvidia",
+  "qualcomm",
+ 
+  # --- Базы данных и брокеры ---------------------------------------
+  "postgresql",
+  "mysql",
+  "mariadb",
+  "mongodb",
+  "redis",
+  "rabbitmq",
+  "apache kafka",
+  "clickhouse",
+  "sqlite",
+ 
+  # --- Веб, CMS, языки, фреймворки (было в исходном конфиге + больше)
+  "apache",
   "apache http server",
   "apache tomcat",
-  "spring framework",
+  "apache struts",
+  "log4j",
+  "nginx",
+  "caddy",
+  "haproxy",
+  "envoy",
   "traefik",
-  "terraform",
+  "php",
+  "python",
+  "java",
+  "node.js",
+  "npm",
+  "ruby",
+  "golang",
+  "rust",
+  "spring framework",
+  "spring boot",
+  "django",
+  "laravel",
   "wordpress",
+  "drupal",
+  "joomla",
+  "magento",
+  "opencart",
+  "prestashop",
+  "moodle",
+  "nextcloud",
+  "owncloud",
+  "roundcube",
+  "gitlab",
+  "github",
+  "jenkins",
+  "gitea",
+  "sonarqube",
+ 
+  # --- Облака и контейнеры -----------------------------------------
+  "amazon web services",
+  "aws",
+  "google cloud",
+  "google cloud platform",
+  "cloudflare",
+  "akamai",
+  "fastly",
+  "docker",
+  "kubernetes",
+  "openshift",
+  "istio",
+  "terraform",
+  "cloud foundry",
+ 
+  # --- Промышленные системы (ICS / SCADA) --------------------------
+  "siemens",
+  "schneider electric",
+  "rockwell",
+  "abb",
+  "honeywell",
+  "mitsubishi electric",
+  "scada",
+  "plc",
 ]
-
+ 
 vulnerability_keywords = [
+  # Универсальные слова: есть почти в каждом описании CVE.
+  # Вместе с порогом CVSS ≥ 7.0 дают "все HIGH и CRITICAL".
+  "vulnerability",
+  "vulnerable",
+  "attacker",
+  "flaw",
+  "issue",
+  "allows",
+  "allow",
+  "could",
+  "dos",
+ 
+  # Конкретные классы (для точности, если универсальные удалите)
   "authentication bypass",
   "authorization bypass",
+  "buffer overflow",
+  "heap overflow",
+  "stack overflow",
+  "integer overflow",
+  "use-after-free",
+  "use after free",
+  "out-of-bounds",
+  "memory corruption",
+  "type confusion",
+  "race condition",
   "command injection",
+  "code injection",
   "cross-site scripting",
+  "cross-site request forgery",
   "deserialization",
   "file inclusion",
+  "file upload",
   "open redirect",
   "path traversal",
+  "directory traversal",
   "privilege escalation",
+  "elevation of privilege",
   "remote code execution",
+  "arbitrary code",
   "request smuggling",
   "server-side request forgery",
-  "sql injection",
   "ssrf",
+  "sql injection",
+  "xml external entity",
+  "denial of service",
+  "information disclosure",
+  "hard-coded credentials",
+  "hardcoded credentials",
+  "missing authentication",
+  "security feature bypass",
+  "spoofing",
+  "zero-day",
 ]
-
+ 
+# CWE-коды (ловят CVE даже без ключевых слов в описании).
 web_cwes = [
-  "CWE-22",
-  "CWE-78",
-  "CWE-79",
-  "CWE-89",
-  "CWE-94",
-  "CWE-287",
-  "CWE-288",
-  "CWE-306",
-  "CWE-352",
-  "CWE-434",
-  "CWE-502",
-  "CWE-601",
-  "CWE-918",
+  "CWE-20",   # Improper Input Validation
+  "CWE-22",   # Path Traversal
+  "CWE-77",   # Command Injection
+  "CWE-78",   # OS Command Injection
+  "CWE-79",   # XSS
+  "CWE-89",   # SQL Injection
+  "CWE-94",   # Code Injection
+  "CWE-119",  # Buffer errors
+  "CWE-120",  # Classic Buffer Overflow
+  "CWE-121",  # Stack-based Buffer Overflow
+  "CWE-122",  # Heap-based Buffer Overflow
+  "CWE-125",  # Out-of-bounds Read
+  "CWE-190",  # Integer Overflow
+  "CWE-200",  # Information Exposure
+  "CWE-269",  # Improper Privilege Management
+  "CWE-276",  # Incorrect Default Permissions
+  "CWE-284",  # Improper Access Control
+  "CWE-285",  # Improper Authorization
+  "CWE-287",  # Improper Authentication
+  "CWE-288",  # Auth Bypass via Alternate Path
+  "CWE-306",  # Missing Authentication
+  "CWE-352",  # CSRF
+  "CWE-362",  # Race Condition
+  "CWE-400",  # Resource Exhaustion
+  "CWE-416",  # Use After Free
+  "CWE-434",  # Unrestricted File Upload
+  "CWE-476",  # NULL Pointer Dereference
+  "CWE-502",  # Deserialization
+  "CWE-601",  # Open Redirect
+  "CWE-611",  # XXE
+  "CWE-639",  # IDOR
+  "CWE-787",  # Out-of-bounds Write
+  "CWE-798",  # Hard-coded Credentials
+  "CWE-843",  # Type Confusion
+  "CWE-862",  # Missing Authorization
+  "CWE-863",  # Incorrect Authorization
+  "CWE-918",  # SSRF
+  "CWE-1321", # Prototype Pollution
 ]
-
+ 
+# Слова-исключения: CVE с ними НЕ будут присылаться.
+# Пример: ["wordpress plugin"], если надоест поток плагинов WordPress.
 exclude_keywords = []
-
+ 
 [feeds]
 nvd_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 exploitdb_csv_url = "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"
+# EPSS (вероятность эксплуатации) — включено
 epss_url = "https://api.first.org/data/v1/epss"
+# CISA KEV (уже эксплуатируются в реальных атаках) — включено
 kev_url = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
