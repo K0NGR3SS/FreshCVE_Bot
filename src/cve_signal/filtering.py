@@ -15,10 +15,18 @@ def is_interesting(cve: CVE, config: ScanConfig) -> bool:
         and not cve.known_exploited
     ):
         return False
+    if (
+        config.severities
+        and not cve.known_exploited
+        and (cve.cvss_severity or "").upper() not in config.severities
+    ):
+        return False
 
     haystack = " ".join((cve.description, *cve.products)).lower()
     if any(_contains(haystack, keyword) for keyword in config.exclude_keywords):
         return False
+    if config.all_products:
+        return True
 
     technology_match = any(
         _contains(haystack, keyword) for keyword in config.technology_keywords

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -169,6 +170,34 @@ class FilteringTests(unittest.TestCase):
         cve = CVE(**{**original.__dict__, "cvss_score": None})
 
         self.assertTrue(is_interesting(cve, scan_config()))
+
+    def test_all_products_ignores_keyword_lists(self) -> None:
+        original = parse_cve(NVD_FIXTURE)
+        cve = replace(
+            original,
+            description="Bitrix24 crashes on crafted input.",
+            products=("1c-bitrix:bitrix24",),
+            cwes=(),
+            known_exploited=False,
+        )
+        self.assertFalse(is_interesting(cve, scan_config()))
+        config = replace(scan_config(), all_products=True)
+        self.assertTrue(is_interesting(cve, config))
+
+    def test_severity_filter_keeps_only_listed_levels(self) -> None:
+        original = parse_cve(NVD_FIXTURE)
+        config = replace(
+            scan_config(),
+            all_products=True,
+            minimum_cvss=0.0,
+            severities=frozenset({"HIGH", "CRITICAL"}),
+        )
+        medium = replace(original, cvss_severity="MEDIUM", known_exploited=False)
+        critical = replace(original, cvss_severity="CRITICAL", known_exploited=False)
+        kev_medium = replace(original, cvss_severity="MEDIUM", known_exploited=True)
+        self.assertFalse(is_interesting(medium, config))
+        self.assertTrue(is_interesting(critical, config))
+        self.assertTrue(is_interesting(kev_medium, config))
 
     def test_rejects_unrelated_technology(self) -> None:
         cve = CVE(

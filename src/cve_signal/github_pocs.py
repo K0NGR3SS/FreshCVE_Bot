@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import base64
 import math
 import os
@@ -58,6 +59,7 @@ class GitHubPoCClient:
         self.timeout = timeout
         self._opener = opener or _open_request
         self.last_search_incomplete = False
+        self._last_search = 0.0
 
     def find_matches(self, cve: CVE, limit: int = 5) -> list[ExploitMatch]:
         query = (
@@ -80,6 +82,7 @@ class GitHubPoCClient:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
 
+        self._pace_search()
         payload = json.loads(self._opener(Request(url, headers=headers), self.timeout))
         self.last_search_incomplete = bool(payload.get("incomplete_results"))
         matches = []
@@ -96,6 +99,15 @@ class GitHubPoCClient:
             if match is not None:
                 matches.append(match)
         return sorted(matches, key=lambda item: (-item.score, item.title))[:limit]
+
+    def _pace_search(self) -> None:
+        # GitHub search API allows 30 authenticated requests per minute.
+        if self._opener is not _open_request:
+            return
+        wait = self._last_search + 2.1 - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        self._last_search = time.monotonic()
 
     def _fetch_readme(self, full_name: str, headers: dict[str, str]) -> str | None:
         if not _FULL_NAME_PATTERN.fullmatch(full_name):

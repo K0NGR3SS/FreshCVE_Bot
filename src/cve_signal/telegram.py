@@ -3,8 +3,10 @@ from __future__ import annotations
 import html
 import json
 import os
+import time
 from datetime import timezone
 from typing import Callable, Sequence
+from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
@@ -23,6 +25,7 @@ class TelegramClient:
         *,
         timeout: float = 30.0,
         sender: TelegramSender | None = None,
+        min_interval: float = 3.1,
     ) -> None:
         if not token or not chat_id:
             raise ValueError("Telegram token and chat ID are required")
@@ -30,6 +33,8 @@ class TelegramClient:
         self._chat_id = chat_id
         self.timeout = timeout
         self._sender = sender or _send_request
+        # Telegram allows ~20 messages per minute in a channel.
+        self.min_interval = min_interval if sender is None else 0.0
 
     @classmethod
     def from_environment(cls) -> TelegramClient:
@@ -62,7 +67,23 @@ class TelegramClient:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             method="POST",
         )
-        response = json.loads(self._sender(request, self.timeout))
+        response: dict = {}
+        for _attempt in range(5):
+            try:
+                response = json.loads(self._sender(request, self.timeout))
+            except HTTPError as error:
+                if error.code != 429:
+                    raise
+                try:
+                    response = json.loads(error.read() or b"{}")
+                except ValueError:
+                    response = {}
+            retry_after = (response.get("parameters") or {}).get("retry_after")
+            if response.get("ok") or response.get("error_code") != 429:
+                break
+            time.sleep(min(float(retry_after or 5), 120) + 1)
+        if self.min_interval:
+            time.sleep(self.min_interval)
         if not response.get("ok"):
             description = response.get("description", "unknown error")
             raise RuntimeError(f"Telegram rejected the message: {description}")

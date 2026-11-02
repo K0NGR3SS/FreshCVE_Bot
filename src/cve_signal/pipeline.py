@@ -66,6 +66,13 @@ def run_scan(
     hours = lookback_hours or config.scan.lookback_hours
     start = end - timedelta(hours=hours)
     oldest_allowed = end - timedelta(hours=config.scan.maximum_cve_age_hours)
+    if config.scan.published_since is not None:
+        since = datetime.combine(
+            config.scan.published_since, datetime.min.time(), tzinfo=timezone.utc
+        )
+        # Every CVE published on or after the configured date is eligible,
+        # regardless of maximum_cve_age_hours.
+        oldest_allowed = since
 
     nvd = nvd_client or NVDClient(config.feeds.nvd_url)
     if cve_ids:
