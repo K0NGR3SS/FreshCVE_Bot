@@ -20,8 +20,8 @@ all_products = true
 lookback_hours = 24
 maximum_cve_age_hours = 48
 
-# Severity: только HIGH и CRITICAL (по NVD/CVSS).
-# CVE из каталога CISA KEV приходят ВСЕГДА, независимо от severity.
+# Severity: только HIGH и CRITICAL (по NVD/CVSS). При включённом
+# alert_gate это строгое условие и для CVE из CISA KEV.
 severities = ["HIGH", "CRITICAL"]
 minimum_cvss = 7.0
 maximum_cvss = 10.0

@@ -197,6 +197,11 @@ class FilteringTests(unittest.TestCase):
         self.assertFalse(passes_alert_gate(hot, all_gate))
         self.assertFalse(passes_alert_gate(replace(base, epss_score=0.19), any_gate))
         self.assertTrue(passes_alert_gate(both, all_gate))
+        strict = replace(all_gate, severities=frozenset({"HIGH", "CRITICAL"}))
+        self.assertTrue(passes_alert_gate(replace(both, cvss_severity="HIGH"), strict))
+        self.assertFalse(
+            passes_alert_gate(replace(both, cvss_severity="MEDIUM"), strict)
+        )
 
     def test_severity_filter_keeps_only_listed_levels(self) -> None:
         original = parse_cve(NVD_FIXTURE)

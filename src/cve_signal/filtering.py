@@ -39,9 +39,17 @@ def is_interesting(cve: CVE, config: ScanConfig) -> bool:
 
 def passes_alert_gate(cve: CVE, config: ScanConfig) -> bool:
     """Return True when the CVE has enough exploitation signal to alert on."""
+    gate = config.alert_gate
+    if gate == "off":
+        return True
+    # With an alert gate the severity list is strict, even for KEV entries.
+    if (
+        config.severities
+        and (cve.cvss_severity or "").upper() not in config.severities
+    ):
+        return False
     kev = cve.known_exploited
     epss = cve.epss_score is not None and cve.epss_score >= config.minimum_epss
-    gate = config.alert_gate
     if gate == "any":
         return kev or epss
     if gate == "all":
