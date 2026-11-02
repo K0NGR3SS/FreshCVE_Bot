@@ -109,13 +109,7 @@ def format_alert(
     nvd_url = f"https://nvd.nist.gov/vuln/detail/{cve.cve_id}"
 
     icon = "🔎" if is_update else "🚨"
-    risk_parts = [f"CVSS {score}"]
-    if cve.known_exploited:
-        risk_parts.append("CISA KEV")
-    if cve.epss_score is not None:
-        risk_parts.append(f"EPSS {cve.epss_score * 100:.1f}%")
-    if cve.epss_percentile is not None:
-        risk_parts.append(f"{cve.epss_percentile * 100:.0f}th pct")
+    risk_parts = [f"CVSS {score}", _kev_text(cve), _epss_text(cve)]
 
     blocks = [
         f"{icon} <b>{html.escape(severity)} · {html.escape(headline)}</b>",
@@ -201,6 +195,22 @@ def format_alert(
     return message
 
 
+def _kev_text(cve: CVE) -> str:
+    if cve.known_exploited:
+        added = f" (added {cve.kev_date_added})" if cve.kev_date_added else ""
+        return f"CISA KEV: YES{added}"
+    return "CISA KEV: no"
+
+
+def _epss_text(cve: CVE) -> str:
+    if cve.epss_score is None:
+        return "EPSS: n/a"
+    text = f"EPSS: {cve.epss_score * 100:.1f}%"
+    if cve.epss_percentile is not None:
+        text += f" ({cve.epss_percentile * 100:.0f}th pct)"
+    return text
+
+
 def format_alert_text(
     cve: CVE,
     matches: list[ExploitMatch],
@@ -218,16 +228,14 @@ def format_alert_text(
         f"Attack: {_attack_text(cve)}",
         f"Affected: {_affected_text(cve)}",
     ]
-    if cve.known_exploited:
-        lines.append("CISA KEV: yes")
+    lines.append(_kev_text(cve))
+    lines.append(_epss_text(cve))
     if cve.kev_due_date:
         lines.append(f"KEV due: {cve.kev_due_date}")
     if cve.known_ransomware_use and cve.known_ransomware_use.lower() == "known":
         lines.append("Ransomware use: Known")
     if cve.kev_required_action:
         lines.append(f"Required action: {_truncate(cve.kev_required_action, 240)}")
-    if cve.epss_score is not None:
-        lines.append(f"EPSS: {cve.epss_score * 100:.1f}%")
     if matches:
         lines.append("Exploit evidence:")
         lines.extend(

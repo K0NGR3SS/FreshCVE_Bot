@@ -26,6 +26,10 @@ class ScanConfig:
     all_products: bool = False
     published_since: date | None = None
     severities: frozenset[str] = frozenset()
+    # Alert gate: "off" (no gate), "any" (KEV or EPSS >= minimum_epss),
+    # "all" (KEV and EPSS >= minimum_epss), "kev" (KEV only), "epss" (EPSS only).
+    alert_gate: str = "off"
+    minimum_epss: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,8 @@ def load_config(path: Path) -> AppConfig:
             maximum_cves_per_run=int(scan.get("maximum_cves_per_run", 25)),
             all_products=bool(scan.get("all_products", False)),
             published_since=_parse_date(scan.get("published_since")),
+            alert_gate=str(scan.get("alert_gate", "off")).lower(),
+            minimum_epss=float(scan.get("minimum_epss", 0.0)),
             severities=frozenset(
                 str(value).upper() for value in scan.get("severities", ())
             ),
@@ -110,6 +116,10 @@ def _validate(config: AppConfig) -> None:
         )
     if scan.maximum_cves_per_run <= 0:
         raise ValueError("maximum_cves_per_run must be positive")
+    if scan.alert_gate not in {"off", "any", "all", "kev", "epss"}:
+        raise ValueError("alert_gate must be off, any, all, kev or epss")
+    if not 0.0 <= scan.minimum_epss <= 1.0:
+        raise ValueError("minimum_epss must be between 0 and 1 (0.2 = 20%)")
     allowed_severities = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
     if not scan.severities <= allowed_severities:
         raise ValueError("severities must be LOW, MEDIUM, HIGH or CRITICAL")

@@ -542,8 +542,63 @@ class PipelineTests(unittest.TestCase):
 
         self.assertEqual(result.notified, 1)
         self.assertIn("CISA KEV", telegram.messages[0])
-        self.assertIn("EPSS 42.0%", telegram.messages[0])
+        self.assertIn("EPSS: 42.0%", telegram.messages[0])
         self.assertIn("KEV due:</b> 2026-09-01", telegram.messages[0])
+
+    def test_alert_gate_waits_for_kev_or_epss_threshold(self) -> None:
+        class ChangingEPSS:
+            score = 0.05
+
+            def fetch_scores(self, cve_ids):
+                return {cve_id: (self.score, 0.5) for cve_id in cve_ids}
+
+        class EmptyKEV:
+            def fetch_added_since(self, _since):
+                return {}
+
+        config = replace(
+            self.config,
+            scan=replace(self.config.scan, alert_gate="any", minimum_epss=0.2),
+            feeds=replace(
+                self.config.feeds,
+                epss_url="https://example.test/epss",
+                kev_url="https://example.test/kev.json",
+            ),
+        )
+        telegram = RecordingTelegram()
+        epss = ChangingEPSS()
+        exploit_client = ExploitDBClient(
+            config.feeds.exploitdb_csv_url,
+            fetcher=lambda _url, _timeout: EXPLOIT_DB_CSV,
+        )
+        cve = replace(interesting_cve(), known_exploited=False)
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.sqlite3"
+            common = {
+                "nvd_client": StaticNVDClient([cve]),
+                "exploit_client": exploit_client,
+                "github_client": StaticGitHubPoCClient(),
+                "epss_client": epss,
+                "kev_client": EmptyKEV(),
+                "telegram_factory": lambda: telegram,
+            }
+            first = run_scan(
+                config,
+                state_path,
+                now=datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc),
+                **common,
+            )
+            epss.score = 0.35
+            second = run_scan(
+                config,
+                state_path,
+                now=datetime(2026, 8, 20, 14, 0, tzinfo=timezone.utc),
+                **common,
+            )
+
+        self.assertEqual((first.notified, second.notified), (0, 1))
+        self.assertIn("EPSS: 35.0%", telegram.messages[0])
+        self.assertIn("CISA KEV: no", telegram.messages[0])
 
     def test_ignores_old_cve_that_was_only_recently_modified(self) -> None:
         old_cve = replace(

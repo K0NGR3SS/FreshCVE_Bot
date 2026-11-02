@@ -37,6 +37,22 @@ def is_interesting(cve: CVE, config: ScanConfig) -> bool:
     return technology_match and vulnerability_match
 
 
+def passes_alert_gate(cve: CVE, config: ScanConfig) -> bool:
+    """Return True when the CVE has enough exploitation signal to alert on."""
+    kev = cve.known_exploited
+    epss = cve.epss_score is not None and cve.epss_score >= config.minimum_epss
+    gate = config.alert_gate
+    if gate == "any":
+        return kev or epss
+    if gate == "all":
+        return kev and epss
+    if gate == "kev":
+        return kev
+    if gate == "epss":
+        return epss
+    return True
+
+
 def _contains(haystack: str, keyword: str) -> bool:
     escaped = re.escape(keyword.lower()).replace(r"\ ", r"\s+")
     return bool(re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", haystack))

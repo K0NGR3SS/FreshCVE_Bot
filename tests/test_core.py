@@ -8,7 +8,7 @@ import unittest
 from urllib.parse import parse_qs, urlsplit
 
 from cve_signal.config import ScanConfig
-from cve_signal.filtering import is_interesting
+from cve_signal.filtering import is_interesting, passes_alert_gate
 from cve_signal.models import CVE, Reference
 from cve_signal.nvd import NVDClient, parse_cve
 from cve_signal.state import StateStore
@@ -183,6 +183,20 @@ class FilteringTests(unittest.TestCase):
         self.assertFalse(is_interesting(cve, scan_config()))
         config = replace(scan_config(), all_products=True)
         self.assertTrue(is_interesting(cve, config))
+
+    def test_alert_gate_modes(self) -> None:
+        base = replace(parse_cve(NVD_FIXTURE), known_exploited=False, epss_score=None)
+        kev = replace(base, known_exploited=True)
+        hot = replace(base, epss_score=0.25)
+        both = replace(base, known_exploited=True, epss_score=0.25)
+        any_gate = replace(scan_config(), alert_gate="any", minimum_epss=0.2)
+        all_gate = replace(any_gate, alert_gate="all")
+        self.assertFalse(passes_alert_gate(base, any_gate))
+        self.assertTrue(passes_alert_gate(kev, any_gate))
+        self.assertTrue(passes_alert_gate(hot, any_gate))
+        self.assertFalse(passes_alert_gate(hot, all_gate))
+        self.assertFalse(passes_alert_gate(replace(base, epss_score=0.19), any_gate))
+        self.assertTrue(passes_alert_gate(both, all_gate))
 
     def test_severity_filter_keeps_only_listed_levels(self) -> None:
         original = parse_cve(NVD_FIXTURE)

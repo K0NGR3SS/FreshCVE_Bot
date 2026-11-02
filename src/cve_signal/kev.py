@@ -30,8 +30,18 @@ class KEVClient:
         self.url = url
         self.timeout = timeout
         self._opener = opener or _open_request
+        self._catalog: dict[str, KEVEntry] | None = None
+
+    def fetch_all(self) -> dict[str, KEVEntry]:
+        return self.fetch_added_since(date.min)
 
     def fetch_added_since(self, since: date) -> dict[str, KEVEntry]:
+        if self._catalog is not None:
+            return {
+                key: entry
+                for key, entry in self._catalog.items()
+                if date.fromisoformat(entry.date_added) >= since
+            }
         request = Request(
             self.url,
             headers={"Accept": "application/json", "User-Agent": "cve-signal/0.2"},
@@ -44,10 +54,8 @@ class KEVClient:
             if not cve_id or not date_added:
                 continue
             try:
-                added = date.fromisoformat(date_added)
+                date.fromisoformat(date_added)
             except ValueError:
-                continue
-            if added < since:
                 continue
             entries[cve_id] = KEVEntry(
                 cve_id=cve_id,
@@ -56,7 +64,12 @@ class KEVClient:
                 required_action=item.get("requiredAction"),
                 known_ransomware_use=item.get("knownRansomwareCampaignUse"),
             )
-        return entries
+        self._catalog = entries
+        return {
+            key: entry
+            for key, entry in entries.items()
+            if date.fromisoformat(entry.date_added) >= since
+        }
 
 
 def _open_request(request: Request, timeout: float) -> bytes:
