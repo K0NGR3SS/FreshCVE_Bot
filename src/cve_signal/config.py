@@ -45,6 +45,10 @@ class FeedConfig:
     bdu_ca_file: str | None = None
     euvd_url: str | None = None
     circl_url: str | None = None
+    # Where CVEs are listed from: "circl" (Vulnerability-Lookup) or "nvd".
+    cve_source: str = "nvd"
+    circl_cve_url: str = "https://vulnerability.circl.lu/api"
+    fallback_to_nvd: bool = True
 
 
 @dataclass(frozen=True)
@@ -89,6 +93,11 @@ def load_config(path: Path) -> AppConfig:
             exploitdb_csv_url=str(feeds["exploitdb_csv_url"]),
             epss_url=str(feeds["epss_url"]) if feeds.get("epss_url") else None,
             kev_url=str(feeds["kev_url"]) if feeds.get("kev_url") else None,
+            cve_source=str(feeds.get("cve_source", "nvd")).lower(),
+            circl_cve_url=str(
+                feeds.get("circl_cve_url") or "https://vulnerability.circl.lu/api"
+            ),
+            fallback_to_nvd=bool(feeds.get("fallback_to_nvd", True)),
             **{
                 key: str(feeds[key]) if feeds.get(key) else None
                 for key in (
@@ -139,6 +148,8 @@ def _validate(config: AppConfig) -> None:
         raise ValueError("alert_gate must be off, any, all, kev or epss")
     if not 0.0 <= scan.minimum_epss <= 1.0:
         raise ValueError("minimum_epss must be between 0 and 1 (0.2 = 20%)")
+    if config.feeds.cve_source not in {"nvd", "circl"}:
+        raise ValueError("cve_source must be nvd or circl")
     allowed_severities = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
     if not scan.severities <= allowed_severities:
         raise ValueError("severities must be LOW, MEDIUM, HIGH or CRITICAL")

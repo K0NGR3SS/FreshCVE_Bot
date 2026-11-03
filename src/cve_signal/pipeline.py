@@ -21,6 +21,7 @@ from cve_signal.intel import Intel, IntelCollector
 from cve_signal.kev import KEVClient, KEVEntry
 from cve_signal.models import CVE
 from cve_signal.nvd import NVDClient
+from cve_signal.circl_source import CIRCLVulnerabilityClient
 from cve_signal.state import StateStore
 from cve_signal.telegram import (
     TelegramClient,
@@ -51,7 +52,7 @@ def run_scan(
     lookback_hours: int | None = None,
     dry_run: bool = False,
     now: datetime | None = None,
-    nvd_client: NVDClient | None = None,
+    nvd_client: NVDClient | CIRCLVulnerabilityClient | None = None,
     exploit_client: ExploitDBClient | None = None,
     github_client: GitHubPoCClient | None = None,
     epss_client: EPSSClient | None = None,
@@ -76,7 +77,7 @@ def run_scan(
         # regardless of maximum_cve_age_hours.
         oldest_allowed = since
 
-    nvd = nvd_client or NVDClient(config.feeds.nvd_url)
+    nvd = nvd_client or _cve_feed(config)
     intel_source = intel_collector or IntelCollector.from_feeds(config.feeds)
     if cve_ids:
         cves = [
@@ -193,6 +194,8 @@ def run_scan(
                 continue
             candidates.append(cve)
         candidates = candidates[: config.scan.maximum_cves_per_run]
+        if gated:
+            _print_gate_summary(due, config, len(candidates))
 
         if not candidates:
             return ScanResult(fetched=len(cves), matched=0, notified=0)
@@ -334,6 +337,75 @@ def _find_exploits(
         key=lambda item: (confidence_order[item.confidence], -item.score, item.title),
     )[:limit]
     return EnrichmentResult(ranked, tuple(statuses))
+
+
+class _FallbackFeed:
+    """Primary CVE feed (CIRCL) with NVD as a safety net."""
+
+    def __init__(self, primary, fallback, name: str) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.name = name
+
+    def _call(self, method: str, *args):
+        try:
+            return getattr(self.primary, method)(*args)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            if self.fallback is None:
+                raise
+            print(
+                f"{self.name} unavailable ({error}); falling back to NVD",
+                file=sys.stderr,
+            )
+            return getattr(self.fallback, method)(*args)
+
+    def fetch_modified(self, start, end):
+        return self._call("fetch_modified", start, end)
+
+    def fetch_by_id(self, cve_id):
+        return self._call("fetch_by_id", cve_id)
+
+
+def _cve_feed(config: AppConfig):
+    feeds = config.feeds
+    if feeds.cve_source != "circl":
+        return NVDClient(feeds.nvd_url)
+    fallback = NVDClient(feeds.nvd_url) if feeds.fallback_to_nvd and feeds.nvd_url else None
+    print(f"CVE source: CIRCL Vulnerability-Lookup ({feeds.circl_cve_url})", file=sys.stderr)
+    return _FallbackFeed(
+        CIRCLVulnerabilityClient(feeds.circl_cve_url), fallback, "CIRCL Vulnerability-Lookup"
+    )
+
+
+def _print_gate_summary(due: list[CVE], config: AppConfig, passed: int) -> None:
+    scan = config.scan
+    severe = [
+        cve
+        for cve in due
+        if not scan.severities or (cve.cvss_severity or "").upper() in scan.severities
+    ]
+    kev = [cve for cve in severe if cve.known_exploited]
+    hot = [
+        cve
+        for cve in severe
+        if cve.epss_score is not None and cve.epss_score >= scan.minimum_epss
+    ]
+    no_epss = sum(cve.epss_score is None for cve in severe)
+    print(
+        f"alert gate ({scan.alert_gate}, EPSS >= {scan.minimum_epss:.0%}): "
+        f"checked={len(due)} high/critical={len(severe)} in_kev={len(kev)} "
+        f"epss_ok={len(hot)} epss_missing={no_epss} passed={passed}"
+    )
+    closest = sorted(
+        {cve.cve_id: cve for cve in kev + hot}.values(),
+        key=lambda cve: -(cve.epss_score or 0.0),
+    )[:5]
+    for cve in closest:
+        epss = f"{cve.epss_score:.1%}" if cve.epss_score is not None else "n/a"
+        print(
+            f"  near miss: {cve.cve_id} {cve.cvss_severity} "
+            f"KEV={'yes' if cve.known_exploited else 'no'} EPSS={epss}"
+        )
 
 
 def _with_record_cvss(cve: CVE, collector: IntelCollector) -> CVE:

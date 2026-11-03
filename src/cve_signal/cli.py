@@ -50,7 +50,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
     if args.sources:
+        print(f"CVE source: {config.feeds.cve_source}")
         for name, value in (
+            ("CIRCL CVE feed", config.feeds.circl_cve_url),
             ("NVD", config.feeds.nvd_url),
             ("Exploit-DB", config.feeds.exploitdb_csv_url),
             ("EPSS", config.feeds.epss_url),

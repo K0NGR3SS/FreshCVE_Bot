@@ -362,6 +362,13 @@ web_cwes = [
 exclude_keywords = []
 
 [feeds]
+# Откуда брать уязвимости: "circl" — CIRCL Vulnerability-Lookup
+# (https://vulnerability.circl.lu, объединяет NVD, CVE.org/CISA
+# Vulnrichment, GitHub, EUVD и др.) или "nvd" — напрямую из NVD.
+cve_source = "circl"
+circl_cve_url = "https://vulnerability.circl.lu/api"
+# Если CIRCL недоступен, взять CVE из NVD, чтобы не пропустить запуск.
+fallback_to_nvd = true
 nvd_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 exploitdb_csv_url = "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"
 # EPSS (вероятность эксплуатации) — включено
