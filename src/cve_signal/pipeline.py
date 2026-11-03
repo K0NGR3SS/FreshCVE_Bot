@@ -496,6 +496,14 @@ def _print_gate_summary(due: list[CVE], config: AppConfig, passed: int) -> None:
         if cve.epss_score is not None and cve.epss_score >= scan.minimum_epss
     ]
     no_epss = sum(cve.epss_score is None for cve in severe)
+    samples = sorted(
+        (cve for cve in severe if cve.epss_score is None), key=lambda cve: cve.published
+    )[:5]
+    for cve in samples:
+        print(
+            f"  no EPSS yet: {cve.cve_id} published {cve.published:%Y-%m-%d %H:%M} UTC "
+            f"{cve.cvss_severity}"
+        )
     print(
         f"alert gate ({scan.alert_gate}, EPSS >= {scan.minimum_epss:.0%}): "
         f"checked={len(due)} high/critical={len(severe)} in_kev={len(kev)} "
