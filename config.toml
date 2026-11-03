@@ -20,20 +20,20 @@ all_products = true
 lookback_hours = 24
 maximum_cve_age_hours = 48
 
-# Severity: только HIGH и CRITICAL (по NVD/CVSS). При включённом
-# alert_gate это строгое условие и для CVE из CISA KEV.
+# Severity: только HIGH и CRITICAL (по NVD/CVSS). Это строгое условие
+# и для CVE из CISA KEV (кроме тех, у которых оценки ещё нет совсем).
 severities = ["HIGH", "CRITICAL"]
 minimum_cvss = 7.0
 maximum_cvss = 10.0
 
 # Фильтр по признакам эксплуатации (сообщение уходит, только если он пройден):
-#   "any"  — CVE в CISA KEV ИЛИ EPSS >= minimum_epss    (выбрано)
+#   "any"  — CVE в CISA KEV ИЛИ EPSS >= minimum_epss
 #   "all"  — CVE в CISA KEV И  EPSS >= minimum_epss                     
-#   "kev"  — только CISA KEV;  "epss" — только EPSS;  "off" — без фильтра
+#   "kev"  — только CISA KEV;  "epss" — только EPSS;  "off" — без фильтра (выбрано)
 # CVE, не прошедшие фильтр, бот продолжает отслеживать monitoring_days дней
 # и пришлёт сообщение, как только EPSS вырастет или CVE попадёт в KEV.
 # У свежих CVE EPSS появляется обычно через ~сутки после публикации.
-alert_gate = "any"   # HIGH/CRITICAL И (CISA KEV ИЛИ EPSS >= 20%)
+alert_gate = "off"   # все HIGH/CRITICAL с published_since, без условия KEV/EPSS
 minimum_epss = 0.20   # 0.20 = 20%
 
 maximum_exploit_matches = 5

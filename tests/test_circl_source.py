@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
+import io
 import json
 import unittest
 from urllib.error import HTTPError
@@ -293,7 +295,46 @@ class CIRCLKEVTests(unittest.TestCase):
         epss = _epss_feed(config)
         kev = _kev_feed(config)
         self.assertIsInstance(epss.primary, CIRCLEPSSClient)
-        self.assertIsNotNone(epss.fallback)
+        self.assertIsNotNone(epss.direct)
         self.assertIsInstance(kev.primary, CIRCLKEVClient)
         direct = replace(config, feeds=replace(config.feeds, epss_source="direct"))
         self.assertNotIsInstance(_epss_feed(direct), _FallbackFeed)
+
+
+class GapFillingEPSSTests(unittest.TestCase):
+    def test_first_fills_cves_circl_has_no_score_for(self) -> None:
+        from cve_signal.pipeline import _GapFillingEPSS
+
+        class Circl:
+            def fetch_scores(self, ids):
+                return {"CVE-2026-1": (0.3, 0.9)}
+
+        class First:
+            asked = None
+
+            def fetch_scores(self, ids):
+                First.asked = list(ids)
+                return {"CVE-2026-2": (0.5, 0.95)}
+
+        with redirect_stdout(io.StringIO()) as out:
+            scores = _GapFillingEPSS(Circl(), First()).fetch_scores(
+                ["CVE-2026-1", "CVE-2026-2", "CVE-2026-3"]
+            )
+        self.assertEqual(scores, {"CVE-2026-1": (0.3, 0.9), "CVE-2026-2": (0.5, 0.95)})
+        self.assertEqual(First.asked, ["CVE-2026-2", "CVE-2026-3"])
+        self.assertIn("from_circl=1 from_first=1 missing=1", out.getvalue())
+
+    def test_circl_failure_uses_first_for_everything(self) -> None:
+        from cve_signal.pipeline import _GapFillingEPSS
+
+        class Broken:
+            def fetch_scores(self, ids):
+                raise OSError("down")
+
+        class First:
+            def fetch_scores(self, ids):
+                return {cve_id: (0.2, 0.8) for cve_id in ids}
+
+        with redirect_stdout(io.StringIO()):
+            scores = _GapFillingEPSS(Broken(), First()).fetch_scores(["CVE-2026-1"])
+        self.assertEqual(scores, {"CVE-2026-1": (0.2, 0.8)})

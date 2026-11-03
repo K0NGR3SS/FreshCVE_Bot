@@ -216,7 +216,11 @@ class FilteringTests(unittest.TestCase):
         kev_medium = replace(original, cvss_severity="MEDIUM", known_exploited=True)
         self.assertFalse(is_interesting(medium, config))
         self.assertTrue(is_interesting(critical, config))
-        self.assertTrue(is_interesting(kev_medium, config))
+        self.assertFalse(is_interesting(kev_medium, config))
+        kev_unscored = replace(
+            original, cvss_severity=None, cvss_score=None, known_exploited=True
+        )
+        self.assertTrue(is_interesting(kev_unscored, config))
 
     def test_rejects_unrelated_technology(self) -> None:
         cve = CVE(

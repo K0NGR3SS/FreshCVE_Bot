@@ -408,14 +408,54 @@ class _FallbackFeed:
         return self._call("fetch_all")
 
 
+class _GapFillingEPSS:
+    """EPSS from CIRCL, with FIRST queried for every CVE CIRCL has no score for.
+
+    CIRCL may serve EPSS from its own copy, which can lag behind FIRST for new
+    CVEs and answers "not found" instead of failing, so a plain fallback would
+    never reach FIRST for them.
+    """
+
+    def __init__(self, primary, direct) -> None:
+        self.primary = primary
+        self.direct = direct
+
+    def fetch_scores(self, cve_ids):
+        ids = sorted({value.upper() for value in cve_ids})
+        scores: dict[str, tuple[float, float]] = {}
+        circl_error = None
+        try:
+            scores.update(self.primary.fetch_scores(ids))
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            circl_error = error
+        from_circl = len(scores)
+        missing = [cve_id for cve_id in ids if cve_id not in scores]
+        from_first = 0
+        if missing and self.direct is not None:
+            try:
+                direct = self.direct.fetch_scores(missing)
+                from_first = len(direct)
+                scores.update(direct)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                print(f"FIRST EPSS unavailable: {error}", file=sys.stderr)
+                if circl_error is not None:
+                    raise
+        elif circl_error is not None:
+            raise circl_error
+        print(
+            f"EPSS: requested={len(ids)} from_circl={from_circl} "
+            f"from_first={from_first} missing={len(ids) - len(scores)}"
+            + (f" (CIRCL error: {circl_error})" if circl_error else "")
+        )
+        return scores
+
+
 def _epss_feed(config: AppConfig):
     feeds = config.feeds
     direct = EPSSClient(feeds.epss_url) if feeds.epss_url else None
     if feeds.epss_source != "circl":
         return direct
-    return _FallbackFeed(
-        CIRCLEPSSClient(feeds.circl_cve_url), direct, "CIRCL EPSS", "FIRST EPSS"
-    )
+    return _GapFillingEPSS(CIRCLEPSSClient(feeds.circl_cve_url), direct)
 
 
 def _kev_feed(config: AppConfig):
@@ -456,6 +496,14 @@ def _print_gate_summary(due: list[CVE], config: AppConfig, passed: int) -> None:
         if cve.epss_score is not None and cve.epss_score >= scan.minimum_epss
     ]
     no_epss = sum(cve.epss_score is None for cve in severe)
+    samples = sorted(
+        (cve for cve in severe if cve.epss_score is None), key=lambda cve: cve.published
+    )[:5]
+    for cve in samples:
+        print(
+            f"  no EPSS yet: {cve.cve_id} published {cve.published:%Y-%m-%d %H:%M} UTC "
+            f"{cve.cvss_severity}"
+        )
     print(
         f"alert gate ({scan.alert_gate}, EPSS >= {scan.minimum_epss:.0%}): "
         f"checked={len(due)} high/critical={len(severe)} in_kev={len(kev)} "
