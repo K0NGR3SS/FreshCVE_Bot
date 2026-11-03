@@ -369,6 +369,13 @@ cve_source = "circl"
 circl_cve_url = "https://vulnerability.circl.lu/api"
 # Если CIRCL недоступен, взять CVE из NVD, чтобы не пропустить запуск.
 fallback_to_nvd = true
+# EPSS и каталог CISA KEV тоже из CIRCL ("circl"); "direct" — напрямую
+# из FIRST и CISA. Если CIRCL не ответит, бот возьмёт их напрямую
+# (epss_url / kev_url ниже).
+epss_source = "circl"
+kev_source = "circl"
+# Каталог CISA KEV внутри CIRCL Vulnerability-Lookup.
+circl_kev_catalog = "405284c2-e461-4670-8979-7fd2c9755a60"
 nvd_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 exploitdb_csv_url = "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"
 # EPSS (вероятность эксплуатации) — включено
@@ -383,7 +390,10 @@ kev_url = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulner
 
 # CVE.org: описание и решение от вендора (CNA), затронутые версии,
 # CISA Vulnrichment (SSVC) и CVSS, если NVD ещё не посчитал.
-cveorg_url = "https://cveawg.mitre.org/api/cve"
+# Отключено: та же запись CVE.org (с CISA Vulnrichment) приходит из CIRCL.
+# Чтобы запрашивать CVE.org напрямую, верните адрес
+# "https://cveawg.mitre.org/api/cve".
+cveorg_url = ""
 # GitHub Advisory Database: open-source пакеты и версия с исправлением.
 ghsa_url = "https://api.github.com/advisories"
 # OSV.dev: версии с исправлением по экосистемам и дистрибутивам.

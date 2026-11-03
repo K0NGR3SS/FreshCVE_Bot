@@ -133,14 +133,26 @@ def parse_circl_record(record: dict[str, Any]) -> CVE | None:
     nvd_item = _decode(meta.get("nvd")) if isinstance(meta, dict) else None
     from_record = parse_cve5(record) if "cveMetadata" in record else None
 
+    cve: CVE | None = None
     if isinstance(nvd_item, dict):
         raw = nvd_item.get("cve", nvd_item)
         if isinstance(raw, dict) and raw.get("id"):
-            cve = parse_cve(raw)
-            return _merge(cve, from_record)
-    if "cve" in record and isinstance(record["cve"], dict) and record["cve"].get("id"):
-        return parse_cve(record["cve"])
-    return from_record
+            cve = _merge(parse_cve(raw), from_record)
+    if cve is None and isinstance(record.get("cve"), dict) and record["cve"].get("id"):
+        cve = parse_cve(record["cve"])
+    if cve is None:
+        cve = from_record
+    epss = _decode(meta.get("epss")) if isinstance(meta, dict) else None
+    if cve is not None and isinstance(epss, dict):
+        try:
+            cve = replace(
+                cve,
+                epss_score=float(epss["epss"]),
+                epss_percentile=float(epss["percentile"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            pass
+    return cve
 
 
 def _merge(nvd: CVE, record: CVE | None) -> CVE:
@@ -353,3 +365,165 @@ def _as_utc(value: datetime) -> datetime:
 def _open_request(request: Request, timeout: float) -> bytes:
     with urlopen(request, timeout=timeout) as response:
         return response.read()
+
+
+# ------------------------------------------------------------------ EPSS
+
+
+class CIRCLEPSSClient:
+    """EPSS scores served by CIRCL (``/api/epss/<CVE>``, FIRST response format)."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout: float = 20.0,
+        workers: int = 8,
+        opener: Opener | None = None,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.workers = workers
+        self._opener = opener or _open_request
+
+    def fetch_scores(self, cve_ids: list[str]) -> dict[str, tuple[float, float]]:
+        from concurrent.futures import ThreadPoolExecutor
+
+        ids = sorted({value.upper() for value in cve_ids})
+        if not ids:
+            return {}
+        failures: list[Exception] = []
+
+        def one(cve_id: str) -> tuple[str, tuple[float, float] | None]:
+            try:
+                return cve_id, self._score(cve_id)
+            except (OSError, ValueError) as error:
+                failures.append(error)
+                return cve_id, None
+
+        with ThreadPoolExecutor(max_workers=max(1, self.workers)) as pool:
+            results = dict(pool.map(one, ids))
+        if failures and len(failures) == len(ids):
+            raise OSError(f"CIRCL EPSS unavailable: {failures[0]}")
+        return {cve_id: score for cve_id, score in results.items() if score is not None}
+
+    def _score(self, cve_id: str) -> tuple[float, float] | None:
+        request = Request(
+            f"{self.base_url}/epss/{quote(cve_id)}",
+            headers={"Accept": "application/json", "User-Agent": _USER_AGENT},
+        )
+        try:
+            payload = json.loads(self._opener(request, self.timeout))
+        except HTTPError as error:
+            if error.code == 404:
+                return None
+            raise
+        return parse_epss_payload(payload, cve_id)
+
+
+def parse_epss_payload(payload: Any, cve_id: str) -> tuple[float, float] | None:
+    for item in (payload or {}).get("data", []) if isinstance(payload, dict) else []:
+        if str(item.get("cve", cve_id)).upper() != cve_id.upper():
+            continue
+        try:
+            return float(item["epss"]), float(item["percentile"])
+        except (KeyError, TypeError, ValueError):
+            return None
+    return None
+
+
+# ------------------------------------------------------------------- KEV
+
+CISA_KEV_CATALOG_UUID = "405284c2-e461-4670-8979-7fd2c9755a60"
+
+
+class CIRCLKEVClient:
+    """The CISA KEV catalog as mirrored by CIRCL (GCVE-BCP-07 entries)."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        catalog_uuid: str = CISA_KEV_CATALOG_UUID,
+        timeout: float = 60.0,
+        opener: Opener | None = None,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.catalog_uuid = catalog_uuid
+        self.timeout = timeout
+        self._opener = opener or _open_request
+        self._catalog: dict[str, Any] | None = None
+        self.max_daily_additions = 30
+
+    def fetch_all(self) -> dict[str, Any]:
+        if self._catalog is None:
+            self._catalog = self._download()
+        return self._catalog
+
+    def fetch_added_since(self, since: Any) -> dict[str, Any]:
+        since_text = since.isoformat()
+        recent = {
+            cve_id: entry
+            for cve_id, entry in self.fetch_all().items()
+            if entry.date_added >= since_text
+        }
+        # CISA adds a handful of entries a day. A burst means the mirror's
+        # timestamps reflect a re-sync rather than CISA's dateAdded, so they
+        # cannot tell which entries are new; membership is still used.
+        if len(recent) > self.max_daily_additions:
+            print(
+                f"CIRCL CISA KEV: {len(recent)} entries dated since {since_text}; "
+                "treating timestamps as sync times and skipping new-entry detection",
+                file=sys.stderr,
+            )
+            return {}
+        return recent
+
+    def _download(self) -> dict[str, Any]:
+        from cve_signal.kev import KEVEntry
+
+        entries: dict[str, Any] = {}
+        for page in range(1, 51):
+            query = urlencode(
+                {
+                    "vulnerability_lookup_origin": self.catalog_uuid,
+                    "per_page": 1000,
+                    "page": page,
+                }
+            )
+            request = Request(
+                f"{self.base_url}/kev/?{query}",
+                headers={"Accept": "application/json", "User-Agent": _USER_AGENT},
+            )
+            payload = json.loads(self._opener(request, self.timeout))
+            items = payload.get("data", []) if isinstance(payload, dict) else []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                status = item.get("status") or {}
+                if status.get("exploited") is False:
+                    continue
+                cve_id = str((item.get("vulnerability") or {}).get("vulnId", "")).upper()
+                if not cve_id.startswith("CVE-"):
+                    continue
+                timestamps = item.get("timestamps") or {}
+                added = next(
+                    (
+                        str(timestamps[key])[:10]
+                        for key in ("first_seen_at", "asserted_at", "recorded_at")
+                        if timestamps.get(key)
+                    ),
+                    str(status.get("status_updated_at", ""))[:10],
+                )
+                entries[cve_id] = KEVEntry(
+                    cve_id=cve_id,
+                    date_added=added or "1970-01-01",
+                    due_date=None,
+                    required_action=None,
+                    known_ransomware_use=None,
+                )
+            if len(items) < 1000:
+                break
+        if not entries:
+            raise ValueError("CIRCL returned an empty CISA KEV catalog")
+        return entries

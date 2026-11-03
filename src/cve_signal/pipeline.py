@@ -21,7 +21,11 @@ from cve_signal.intel import Intel, IntelCollector
 from cve_signal.kev import KEVClient, KEVEntry
 from cve_signal.models import CVE
 from cve_signal.nvd import NVDClient
-from cve_signal.circl_source import CIRCLVulnerabilityClient
+from cve_signal.circl_source import (
+    CIRCLEPSSClient,
+    CIRCLKEVClient,
+    CIRCLVulnerabilityClient,
+)
 from cve_signal.state import StateStore
 from cve_signal.telegram import (
     TelegramClient,
@@ -90,15 +94,30 @@ def run_scan(
 
     kev_entries: dict[str, KEVEntry] = {}
     kev_status: SourceStatus | None = None
-    if config.feeds.kev_url and not cve_ids:
-        kev = kev_client or KEVClient(config.feeds.kev_url)
+    kev = kev_client or _kev_feed(config)
+    if kev is not None and not cve_ids:
         try:
             kev_entries = kev.fetch_added_since(start.date())
             known = {cve.cve_id for cve in cves}
+            revived = 0
             for cve_id in sorted(set(kev_entries).difference(known)):
+                if revived >= _MAX_NEW_KEV_PER_RUN:
+                    print(
+                        f"KEV: more than {_MAX_NEW_KEV_PER_RUN} new entries; "
+                        "the rest are checked on the next run",
+                        file=sys.stderr,
+                    )
+                    break
                 cve = nvd.fetch_by_id(cve_id)
-                if cve is not None:
-                    cves.append(cve)
+                if cve is None:
+                    continue
+                # CISA's own dateAdded (from the NVD record) wins over the
+                # catalog mirror's timestamps, which may be sync times.
+                if cve.kev_date_added and cve.kev_date_added < start.date().isoformat():
+                    kev_entries.pop(cve_id, None)
+                    continue
+                cves.append(cve)
+                revived += 1
             kev_status = SourceStatus("CISA KEV", "ok")
         except (OSError, ValueError) as error:
             kev_status = SourceStatus("CISA KEV", "unavailable", str(error))
@@ -148,23 +167,25 @@ def run_scan(
 
         # KEV status for every due CVE (not only entries added this window),
         # so a monitored CVE is picked up as soon as CISA adds it.
-        if gated and config.feeds.kev_url and kev_status is not None:
+        if gated and kev is not None and kev_status is not None:
             if kev_status.state == "ok":
                 fetch_all = getattr(kev, "fetch_all", None)
                 catalog = fetch_all() if callable(fetch_all) else kev_entries
                 due = [_apply_kev(cve, catalog.get(cve.cve_id)) for cve in due]
 
         epss_status: SourceStatus | None = None
-        if config.feeds.epss_url:
-            epss = epss_client or EPSSClient(config.feeds.epss_url)
+        epss = epss_client or _epss_feed(config)
+        if epss is not None:
             try:
                 scores = epss.fetch_scores([cve.cve_id for cve in due])
                 due = [
                     replace(
                         cve,
-                        epss_score=scores.get(cve.cve_id, (None, None))[0],
-                        epss_percentile=scores.get(cve.cve_id, (None, None))[1],
+                        epss_score=scores[cve.cve_id][0],
+                        epss_percentile=scores[cve.cve_id][1],
                     )
+                    if cve.cve_id in scores
+                    else cve
                     for cve in due
                 ]
                 epss_status = SourceStatus("EPSS", "ok")
@@ -339,31 +360,70 @@ def _find_exploits(
     return EnrichmentResult(ranked, tuple(statuses))
 
 
-class _FallbackFeed:
-    """Primary CVE feed (CIRCL) with NVD as a safety net."""
+_MAX_NEW_KEV_PER_RUN = 50
 
-    def __init__(self, primary, fallback, name: str) -> None:
+
+class _FallbackFeed:
+    """A CIRCL-backed client with the direct upstream source as a safety net."""
+
+    def __init__(self, primary, fallback, name: str, fallback_name: str = "NVD") -> None:
         self.primary = primary
         self.fallback = fallback
         self.name = name
+        self.fallback_name = fallback_name
+        self._use_fallback = False
 
     def _call(self, method: str, *args):
-        try:
-            return getattr(self.primary, method)(*args)
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            if self.fallback is None:
-                raise
-            print(
-                f"{self.name} unavailable ({error}); falling back to NVD",
-                file=sys.stderr,
-            )
-            return getattr(self.fallback, method)(*args)
+        if not self._use_fallback:
+            try:
+                return getattr(self.primary, method)(*args)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                if self.fallback is None:
+                    raise
+                print(
+                    f"{self.name} unavailable ({error}); falling back to {self.fallback_name}",
+                    file=sys.stderr,
+                )
+                self._use_fallback = True
+        return getattr(self.fallback, method)(*args)
 
     def fetch_modified(self, start, end):
         return self._call("fetch_modified", start, end)
 
     def fetch_by_id(self, cve_id):
         return self._call("fetch_by_id", cve_id)
+
+    def fetch_scores(self, cve_ids):
+        return self._call("fetch_scores", cve_ids)
+
+    def fetch_added_since(self, since):
+        return self._call("fetch_added_since", since)
+
+    def fetch_all(self):
+        return self._call("fetch_all")
+
+
+def _epss_feed(config: AppConfig):
+    feeds = config.feeds
+    direct = EPSSClient(feeds.epss_url) if feeds.epss_url else None
+    if feeds.epss_source != "circl":
+        return direct
+    return _FallbackFeed(
+        CIRCLEPSSClient(feeds.circl_cve_url), direct, "CIRCL EPSS", "FIRST EPSS"
+    )
+
+
+def _kev_feed(config: AppConfig):
+    feeds = config.feeds
+    direct = KEVClient(feeds.kev_url) if feeds.kev_url else None
+    if feeds.kev_source != "circl":
+        return direct
+    return _FallbackFeed(
+        CIRCLKEVClient(feeds.circl_cve_url, catalog_uuid=feeds.circl_kev_catalog),
+        direct,
+        "CIRCL CISA KEV",
+        "CISA KEV feed",
+    )
 
 
 def _cve_feed(config: AppConfig):
@@ -442,8 +502,8 @@ def _apply_kev(cve: CVE, entry: KEVEntry | None) -> CVE:
     return replace(
         cve,
         known_exploited=True,
-        kev_date_added=entry.date_added,
-        kev_due_date=entry.due_date,
-        kev_required_action=entry.required_action,
-        known_ransomware_use=entry.known_ransomware_use,
+        kev_date_added=cve.kev_date_added or entry.date_added,
+        kev_due_date=entry.due_date or cve.kev_due_date,
+        kev_required_action=entry.required_action or cve.kev_required_action,
+        known_ransomware_use=entry.known_ransomware_use or cve.known_ransomware_use,
     )

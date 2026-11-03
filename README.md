@@ -66,6 +66,7 @@ Edit [`config.toml`](config.toml) to change:
 - Vulnerability keywords and CWE identifiers.
 - Excluded terms, per-run CVE budget, number of exploit matches, GitHub candidate count, and README verification budget.
 - `cve_source`: list CVEs from `circl` ([CIRCL Vulnerability-Lookup](https://vulnerability.circl.lu), which bundles NVD, the CVE List with CISA Vulnrichment, GitHub, EUVD and more) or directly from `nvd`. With `fallback_to_nvd = true` a CIRCL outage falls back to NVD.
+- `epss_source` / `kev_source`: take EPSS and the CISA KEV catalog from CIRCL (`circl`) or directly from FIRST and CISA (`direct`). With `circl`, a CIRCL failure falls back to the direct feeds.
 - NVD, Exploit-DB, EPSS, and CISA KEV feed URLs.
 - Extra enrichment sources for richer alerts (each optional, leave empty to disable):
   CVE.org with CISA Vulnrichment (vendor description, solution, SSVC, CVSS fallback),
