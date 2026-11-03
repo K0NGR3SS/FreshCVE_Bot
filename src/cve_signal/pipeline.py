@@ -202,11 +202,10 @@ def run_scan(
 
         candidates: list[CVE] = []
         for cve in due:
-            if (
-                gated
-                and not state.was_notified(cve.cve_id)
-                and not passes_alert_gate(cve, config.scan)
-            ):
+            # The gate also applies to follow-ups on CVEs alerted earlier (for
+            # example before the gate was configured): no reply is posted
+            # unless the CVE meets the configured KEV / EPSS conditions.
+            if gated and not passes_alert_gate(cve, config.scan):
                 # Not enough exploitation signal yet: keep watching it so a
                 # later EPSS rise or KEV listing still triggers an alert.
                 if not dry_run:
