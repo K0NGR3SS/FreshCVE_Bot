@@ -600,6 +600,69 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("EPSS: 35.0%", telegram.messages[0])
         self.assertIn("CISA KEV: no", telegram.messages[0])
 
+    def test_gate_also_blocks_follow_ups_for_earlier_alerts(self) -> None:
+        class NoEPSS:
+            def fetch_scores(self, cve_ids):
+                return {}
+
+        class EmptyKEV:
+            def fetch_added_since(self, _since):
+                return {}
+
+        github_match = ExploitMatch(
+            title="researcher/CVE-2026-12345",
+            url="https://github.com/researcher/CVE-2026-12345",
+            source="GitHub",
+            score=115.0,
+            reason="exact CVE ID in repository name",
+            exploit_type="PoC candidate",
+            confidence="strong",
+        )
+        telegram = RecordingTelegram()
+        github = StaticGitHubPoCClient()
+        cve = replace(interesting_cve(), known_exploited=False)
+        exploit_client = ExploitDBClient(
+            self.config.feeds.exploitdb_csv_url,
+            fetcher=lambda _url, _timeout: EXPLOIT_DB_CSV,
+        )
+        gated = replace(
+            self.config,
+            scan=replace(self.config.scan, alert_gate="any", minimum_epss=0.2),
+            feeds=replace(
+                self.config.feeds,
+                epss_url="https://example.test/epss",
+                kev_url="https://example.test/kev.json",
+            ),
+        )
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.sqlite3"
+            common = {
+                "nvd_client": StaticNVDClient([cve]),
+                "exploit_client": exploit_client,
+                "github_client": github,
+                "telegram_factory": lambda: telegram,
+            }
+            # Alerted while no gate was configured.
+            first = run_scan(
+                self.config,
+                state_path,
+                now=datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc),
+                **common,
+            )
+            github.matches = [github_match]
+            # Now gated: a new PoC must not produce a reply below the gate.
+            second = run_scan(
+                gated,
+                state_path,
+                now=datetime(2026, 8, 20, 14, 0, tzinfo=timezone.utc),
+                epss_client=NoEPSS(),
+                kev_client=EmptyKEV(),
+                **common,
+            )
+
+        self.assertEqual((first.notified, second.notified), (1, 0))
+        self.assertEqual(len(telegram.messages), 1)
+
     def test_ignores_old_cve_that_was_only_recently_modified(self) -> None:
         old_cve = replace(
             interesting_cve(),
@@ -667,3 +730,46 @@ class FeedEnrichmentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPostTests(unittest.TestCase):
+    def test_test_post_sends_marked_alert_without_state(self) -> None:
+        config = AppConfig(
+            scan=scan_config(),
+            feeds=FeedConfig(
+                nvd_url="https://nvd.test",
+                exploitdb_csv_url="https://exploitdb.test/files.csv",
+            ),
+        )
+        telegram = RecordingTelegram()
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.sqlite3"
+            result = run_scan(
+                config,
+                state_path,
+                test_post=True,
+                cve_ids=("CVE-2026-12345",),
+                now=datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc),
+                nvd_client=StaticNVDClient([interesting_cve()]),
+                exploit_client=ExploitDBClient(
+                    config.feeds.exploitdb_csv_url,
+                    fetcher=lambda _url, _timeout: EXPLOIT_DB_CSV,
+                ),
+                github_client=StaticGitHubPoCClient(),
+                telegram_factory=lambda: telegram,
+            )
+            self.assertFalse(state_path.exists())
+        self.assertEqual(result.notified, 1)
+        self.assertTrue(telegram.messages[0].startswith("🧪 <b>ТЕСТОВЫЙ ПОСТ</b>"))
+
+    def test_test_post_requires_cve_ids(self) -> None:
+        with self.assertRaises(ValueError):
+            run_scan(
+                AppConfig(
+                    scan=scan_config(),
+                    feeds=FeedConfig(nvd_url="https://nvd.test", exploitdb_csv_url="x"),
+                ),
+                Path("unused.sqlite3"),
+                test_post=True,
+                nvd_client=StaticNVDClient([]),
+            )
