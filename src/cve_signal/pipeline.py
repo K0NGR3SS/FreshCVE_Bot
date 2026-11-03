@@ -55,6 +55,7 @@ def run_scan(
     *,
     lookback_hours: int | None = None,
     dry_run: bool = False,
+    test_post: bool = False,
     now: datetime | None = None,
     nvd_client: NVDClient | CIRCLVulnerabilityClient | None = None,
     exploit_client: ExploitDBClient | None = None,
@@ -132,7 +133,10 @@ def run_scan(
     cves = list(unique_cves.values())
     explicit_ids = {value.upper() for value in cve_ids}
 
-    with StateStore(":memory:" if dry_run else state_path) as state:
+    if test_post and not cve_ids:
+        raise ValueError("test_post requires explicit CVE IDs")
+    # A test post goes to Telegram but never touches the monitoring state.
+    with StateStore(":memory:" if dry_run or test_post else state_path) as state:
         for cve in cves:
             state.record_seen(cve.cve_id, end)
             already_monitored = state.is_monitored(cve.cve_id)
@@ -288,6 +292,8 @@ def run_scan(
                     print()
             else:
                 assert telegram is not None
+                if test_post:
+                    message = "🧪 <b>ТЕСТОВЫЙ ПОСТ</b> (проверка бота)\n\n" + message
                 message_id = telegram.send(
                     message,
                     reply_to_message_id=(

@@ -19,6 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=Path("config.toml"))
     parser.add_argument("--state", type=Path, default=Path("data/state.sqlite3"))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--test-post",
+        action="store_true",
+        help="Send the --cve alerts to Telegram as a marked test, without saving state.",
+    )
     parser.add_argument("--since-hours", type=_positive_int)
     parser.add_argument(
         "--cve",
@@ -72,7 +77,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run and args.format != "telegram-html":
         print("cve-signal failed: --format is only available with --dry-run", file=sys.stderr)
         return 2
-    if not args.dry_run and (args.cve or args.explain):
+    if args.test_post and (args.dry_run or not args.cve):
+        print("cve-signal failed: --test-post needs --cve and no --dry-run", file=sys.stderr)
+        return 2
+    if not args.dry_run and not args.test_post and (args.cve or args.explain):
         print(
             "cve-signal failed: --cve and --explain require --dry-run",
             file=sys.stderr,
@@ -84,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
             args.state,
             lookback_hours=args.since_hours,
             dry_run=args.dry_run,
+            test_post=args.test_post,
             cve_ids=tuple(args.cve),
             output_format=args.format,
             explain=args.explain,

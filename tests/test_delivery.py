@@ -667,3 +667,46 @@ class FeedEnrichmentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPostTests(unittest.TestCase):
+    def test_test_post_sends_marked_alert_without_state(self) -> None:
+        config = AppConfig(
+            scan=scan_config(),
+            feeds=FeedConfig(
+                nvd_url="https://nvd.test",
+                exploitdb_csv_url="https://exploitdb.test/files.csv",
+            ),
+        )
+        telegram = RecordingTelegram()
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.sqlite3"
+            result = run_scan(
+                config,
+                state_path,
+                test_post=True,
+                cve_ids=("CVE-2026-12345",),
+                now=datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc),
+                nvd_client=StaticNVDClient([interesting_cve()]),
+                exploit_client=ExploitDBClient(
+                    config.feeds.exploitdb_csv_url,
+                    fetcher=lambda _url, _timeout: EXPLOIT_DB_CSV,
+                ),
+                github_client=StaticGitHubPoCClient(),
+                telegram_factory=lambda: telegram,
+            )
+            self.assertFalse(state_path.exists())
+        self.assertEqual(result.notified, 1)
+        self.assertTrue(telegram.messages[0].startswith("🧪 <b>ТЕСТОВЫЙ ПОСТ</b>"))
+
+    def test_test_post_requires_cve_ids(self) -> None:
+        with self.assertRaises(ValueError):
+            run_scan(
+                AppConfig(
+                    scan=scan_config(),
+                    feeds=FeedConfig(nvd_url="https://nvd.test", exploitdb_csv_url="x"),
+                ),
+                Path("unused.sqlite3"),
+                test_post=True,
+                nvd_client=StaticNVDClient([]),
+            )
