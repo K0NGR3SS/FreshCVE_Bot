@@ -15,12 +15,12 @@ def is_interesting(cve: CVE, config: ScanConfig) -> bool:
         and not cve.known_exploited
     ):
         return False
-    if (
-        config.severities
-        and not cve.known_exploited
-        and (cve.cvss_severity or "").upper() not in config.severities
-    ):
-        return False
+    # The severity list is strict, KEV entries included. Only a KEV entry
+    # that has no severity yet is kept, so a CVSS published later can count.
+    severity = (cve.cvss_severity or "").upper()
+    if config.severities and severity not in config.severities:
+        if severity or not cve.known_exploited:
+            return False
 
     haystack = " ".join((cve.description, *cve.products)).lower()
     if any(_contains(haystack, keyword) for keyword in config.exclude_keywords):
