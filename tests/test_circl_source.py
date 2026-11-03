@@ -185,3 +185,115 @@ class FeedSelectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from datetime import date
+
+from cve_signal.circl_source import (
+    CIRCLEPSSClient,
+    CIRCLKEVClient,
+    parse_epss_payload,
+)
+from cve_signal.pipeline import _epss_feed, _kev_feed
+
+
+def kev_item(cve_id: str, first_seen: str, exploited: bool = True) -> dict:
+    return {
+        "vulnerability": {"vulnId": cve_id},
+        "status": {"exploited": exploited, "status_updated_at": "2026-01-01T00:00:00"},
+        "timestamps": {"first_seen_at": f"{first_seen}T00:00:00Z"},
+    }
+
+
+class RouteWeb:
+    def __init__(self, routes):
+        self.routes = routes
+        self.urls = []
+
+    def __call__(self, request, _timeout):
+        url = request.full_url
+        self.urls.append(url)
+        for fragment, payload in self.routes.items():
+            if fragment in url:
+                if isinstance(payload, Exception):
+                    raise payload
+                return json.dumps(payload).encode()
+        raise HTTPError(url, 404, "Not Found", hdrs=None, fp=None)
+
+
+class CIRCLEPSSTests(unittest.TestCase):
+    def test_parses_first_format(self) -> None:
+        payload = {"data": [{"cve": "CVE-2026-1", "epss": "0.25", "percentile": "0.97"}]}
+        self.assertEqual(parse_epss_payload(payload, "CVE-2026-1"), (0.25, 0.97))
+        self.assertIsNone(parse_epss_payload({"data": []}, "CVE-2026-1"))
+
+    def test_fetch_scores_skips_missing(self) -> None:
+        web = RouteWeb(
+            {"/epss/CVE-2026-1": {"data": [{"cve": "CVE-2026-1", "epss": "0.3", "percentile": "0.9"}]}}
+        )
+        client = CIRCLEPSSClient("https://circl.test/api", opener=web)
+        self.assertEqual(
+            client.fetch_scores(["CVE-2026-1", "CVE-2026-2"]), {"CVE-2026-1": (0.3, 0.9)}
+        )
+
+    def test_total_failure_raises_for_fallback(self) -> None:
+        web = RouteWeb({"/epss/": OSError("down")})
+        client = CIRCLEPSSClient("https://circl.test/api", opener=web)
+        with self.assertRaises(OSError):
+            client.fetch_scores(["CVE-2026-1"])
+
+    def test_epss_from_record_meta(self) -> None:
+        record = cve5_record()
+        record["vulnerability-lookup:meta"] = {"epss": {"epss": 0.42, "percentile": 0.99}}
+        cve = parse_circl_record(record)
+        self.assertEqual((cve.epss_score, cve.epss_percentile), (0.42, 0.99))
+
+
+class CIRCLKEVTests(unittest.TestCase):
+    def test_catalog_and_recent_entries(self) -> None:
+        web = RouteWeb(
+            {
+                "/kev/": {
+                    "metadata": {"count": 3},
+                    "data": [
+                        kev_item("CVE-2026-1", "2026-11-02"),
+                        kev_item("CVE-2020-2", "2020-05-01"),
+                        kev_item("CVE-2021-3", "2021-01-01", exploited=False),
+                    ],
+                }
+            }
+        )
+        client = CIRCLKEVClient("https://circl.test/api", opener=web)
+
+        self.assertEqual(set(client.fetch_all()), {"CVE-2026-1", "CVE-2020-2"})
+        self.assertEqual(set(client.fetch_added_since(date(2026, 11, 1))), {"CVE-2026-1"})
+        self.assertIn("vulnerability_lookup_origin=405284c2", web.urls[0])
+        self.assertEqual(len(web.urls), 1)  # catalog cached per run
+
+    def test_resync_burst_disables_new_entry_detection(self) -> None:
+        data = [kev_item(f"CVE-2026-{index}", "2026-11-02") for index in range(100)]
+        client = CIRCLKEVClient(
+            "https://circl.test/api", opener=RouteWeb({"/kev/": {"data": data}})
+        )
+        self.assertEqual(client.fetch_added_since(date(2026, 11, 1)), {})
+        self.assertEqual(len(client.fetch_all()), 100)
+
+    def test_feeds_select_circl_with_direct_fallback(self) -> None:
+        config = AppConfig(
+            scan=scan_config(),
+            feeds=FeedConfig(
+                nvd_url="https://nvd.test",
+                exploitdb_csv_url="https://exploitdb.test",
+                epss_url="https://first.test/epss",
+                kev_url="https://cisa.test/kev.json",
+                epss_source="circl",
+                kev_source="circl",
+            ),
+        )
+        epss = _epss_feed(config)
+        kev = _kev_feed(config)
+        self.assertIsInstance(epss.primary, CIRCLEPSSClient)
+        self.assertIsNotNone(epss.fallback)
+        self.assertIsInstance(kev.primary, CIRCLKEVClient)
+        direct = replace(config, feeds=replace(config.feeds, epss_source="direct"))
+        self.assertNotIsInstance(_epss_feed(direct), _FallbackFeed)

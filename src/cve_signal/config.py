@@ -49,6 +49,10 @@ class FeedConfig:
     cve_source: str = "nvd"
     circl_cve_url: str = "https://vulnerability.circl.lu/api"
     fallback_to_nvd: bool = True
+    # Where EPSS and CISA KEV come from: "circl" or "direct" (FIRST / CISA).
+    epss_source: str = "direct"
+    kev_source: str = "direct"
+    circl_kev_catalog: str = "405284c2-e461-4670-8979-7fd2c9755a60"
 
 
 @dataclass(frozen=True)
@@ -98,6 +102,11 @@ def load_config(path: Path) -> AppConfig:
                 feeds.get("circl_cve_url") or "https://vulnerability.circl.lu/api"
             ),
             fallback_to_nvd=bool(feeds.get("fallback_to_nvd", True)),
+            epss_source=str(feeds.get("epss_source", "direct")).lower(),
+            kev_source=str(feeds.get("kev_source", "direct")).lower(),
+            circl_kev_catalog=str(
+                feeds.get("circl_kev_catalog") or "405284c2-e461-4670-8979-7fd2c9755a60"
+            ),
             **{
                 key: str(feeds[key]) if feeds.get(key) else None
                 for key in (
@@ -148,6 +157,9 @@ def _validate(config: AppConfig) -> None:
         raise ValueError("alert_gate must be off, any, all, kev or epss")
     if not 0.0 <= scan.minimum_epss <= 1.0:
         raise ValueError("minimum_epss must be between 0 and 1 (0.2 = 20%)")
+    for name in ("epss_source", "kev_source"):
+        if getattr(config.feeds, name) not in {"circl", "direct"}:
+            raise ValueError(f"{name} must be circl or direct")
     if config.feeds.cve_source not in {"nvd", "circl"}:
         raise ValueError("cve_source must be nvd or circl")
     allowed_severities = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}

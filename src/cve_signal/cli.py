@@ -51,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
     if args.sources:
         print(f"CVE source: {config.feeds.cve_source}")
+        print(f"EPSS source: {config.feeds.epss_source}")
+        print(f"CISA KEV source: {config.feeds.kev_source}")
         for name, value in (
             ("CIRCL CVE feed", config.feeds.circl_cve_url),
             ("NVD", config.feeds.nvd_url),
