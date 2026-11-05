@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 import tomllib
 
@@ -22,6 +23,17 @@ class ScanConfig:
     github_candidates: int = 50
     github_readme_checks: int = 10
     maximum_cves_per_run: int = 25
+    # Collection window: continue from the last successful collection.
+    overlap_minutes: int = 120
+    max_window_hours: int = 168
+    max_catch_up_days: int = 60
+    all_products: bool = False
+    published_since: date | None = None
+    severities: frozenset[str] = frozenset()
+    # Alert gate: "off" (no gate), "any" (KEV or EPSS >= minimum_epss),
+    # "all" (KEV and EPSS >= minimum_epss), "kev" (KEV only), "epss" (EPSS only).
+    alert_gate: str = "off"
+    minimum_epss: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -30,6 +42,21 @@ class FeedConfig:
     exploitdb_csv_url: str
     epss_url: str | None = None
     kev_url: str | None = None
+    cveorg_url: str | None = None
+    ghsa_url: str | None = None
+    osv_url: str | None = None
+    bdu_url: str | None = None
+    bdu_ca_file: str | None = None
+    euvd_url: str | None = None
+    circl_url: str | None = None
+    # Where CVEs are listed from: "circl" (Vulnerability-Lookup) or "nvd".
+    cve_source: str = "nvd"
+    circl_cve_url: str = "https://vulnerability.circl.lu/api"
+    fallback_to_nvd: bool = True
+    # Where EPSS and CISA KEV come from: "circl" or "direct" (FIRST / CISA).
+    epss_source: str = "direct"
+    kev_source: str = "direct"
+    circl_kev_catalog: str = "405284c2-e461-4670-8979-7fd2c9755a60"
 
 
 @dataclass(frozen=True)
@@ -61,16 +88,56 @@ def load_config(path: Path) -> AppConfig:
             github_candidates=int(scan.get("github_candidates", 50)),
             github_readme_checks=int(scan.get("github_readme_checks", 10)),
             maximum_cves_per_run=int(scan.get("maximum_cves_per_run", 25)),
+            overlap_minutes=int(scan.get("overlap_minutes", 120)),
+            max_window_hours=int(scan.get("max_window_hours", 168)),
+            max_catch_up_days=int(scan.get("max_catch_up_days", 60)),
+            all_products=bool(scan.get("all_products", False)),
+            published_since=_parse_date(scan.get("published_since")),
+            alert_gate=str(scan.get("alert_gate", "off")).lower(),
+            minimum_epss=float(scan.get("minimum_epss", 0.0)),
+            severities=frozenset(
+                str(value).upper() for value in scan.get("severities", ())
+            ),
         ),
         feeds=FeedConfig(
             nvd_url=str(feeds["nvd_url"]),
             exploitdb_csv_url=str(feeds["exploitdb_csv_url"]),
             epss_url=str(feeds["epss_url"]) if feeds.get("epss_url") else None,
             kev_url=str(feeds["kev_url"]) if feeds.get("kev_url") else None,
+            cve_source=str(feeds.get("cve_source", "nvd")).lower(),
+            circl_cve_url=str(
+                feeds.get("circl_cve_url") or "https://vulnerability.circl.lu/api"
+            ),
+            fallback_to_nvd=bool(feeds.get("fallback_to_nvd", True)),
+            epss_source=str(feeds.get("epss_source", "direct")).lower(),
+            kev_source=str(feeds.get("kev_source", "direct")).lower(),
+            circl_kev_catalog=str(
+                feeds.get("circl_kev_catalog") or "405284c2-e461-4670-8979-7fd2c9755a60"
+            ),
+            **{
+                key: str(feeds[key]) if feeds.get(key) else None
+                for key in (
+                    "cveorg_url",
+                    "ghsa_url",
+                    "osv_url",
+                    "bdu_url",
+                    "bdu_ca_file",
+                    "euvd_url",
+                    "circl_url",
+                )
+            },
         ),
     )
     _validate(config)
     return config
+
+
+def _parse_date(value: object) -> date | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
 
 
 def _validate(config: AppConfig) -> None:
@@ -91,8 +158,22 @@ def _validate(config: AppConfig) -> None:
         raise ValueError(
             "github_readme_checks must be between 0 and github_candidates"
         )
+    if scan.overlap_minutes < 0 or scan.max_window_hours <= 0 or scan.max_catch_up_days <= 0:
+        raise ValueError("collection window settings must be positive")
     if scan.maximum_cves_per_run <= 0:
         raise ValueError("maximum_cves_per_run must be positive")
+    if scan.alert_gate not in {"off", "any", "all", "kev", "epss"}:
+        raise ValueError("alert_gate must be off, any, all, kev or epss")
+    if not 0.0 <= scan.minimum_epss <= 1.0:
+        raise ValueError("minimum_epss must be between 0 and 1 (0.2 = 20%)")
+    for name in ("epss_source", "kev_source"):
+        if getattr(config.feeds, name) not in {"circl", "direct"}:
+            raise ValueError(f"{name} must be circl or direct")
+    if config.feeds.cve_source not in {"nvd", "circl"}:
+        raise ValueError("cve_source must be nvd or circl")
+    allowed_severities = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+    if not scan.severities <= allowed_severities:
+        raise ValueError("severities must be LOW, MEDIUM, HIGH or CRITICAL")
     malformed_cwes = [value for value in scan.web_cwes if not value.startswith("CWE-")]
     if malformed_cwes:
         raise ValueError("web_cwes entries must start with CWE-")

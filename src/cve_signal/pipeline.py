@@ -15,11 +15,17 @@ from cve_signal.exploits import (
     SourceStatus,
     canonicalize_url,
 )
-from cve_signal.filtering import is_interesting
+from cve_signal.filtering import is_interesting, passes_alert_gate
 from cve_signal.github_pocs import GitHubPoCClient
+from cve_signal.intel import Intel, IntelCollector
 from cve_signal.kev import KEVClient, KEVEntry
 from cve_signal.models import CVE
 from cve_signal.nvd import NVDClient
+from cve_signal.circl_source import (
+    CIRCLEPSSClient,
+    CIRCLKEVClient,
+    CIRCLVulnerabilityClient,
+)
 from cve_signal.state import StateStore
 from cve_signal.telegram import (
     TelegramClient,
@@ -49,8 +55,9 @@ def run_scan(
     *,
     lookback_hours: int | None = None,
     dry_run: bool = False,
+    test_post: bool = False,
     now: datetime | None = None,
-    nvd_client: NVDClient | None = None,
+    nvd_client: NVDClient | CIRCLVulnerabilityClient | None = None,
     exploit_client: ExploitDBClient | None = None,
     github_client: GitHubPoCClient | None = None,
     epss_client: EPSSClient | None = None,
@@ -59,15 +66,28 @@ def run_scan(
     cve_ids: tuple[str, ...] = (),
     output_format: str = "telegram-html",
     explain: bool = False,
+    intel_collector: IntelCollector | None = None,
 ) -> ScanResult:
     end = now or datetime.now(timezone.utc)
     if end.tzinfo is None:
         end = end.replace(tzinfo=timezone.utc)
-    hours = lookback_hours or config.scan.lookback_hours
-    start = end - timedelta(hours=hours)
+    window = collection_window(
+        config, state_path, end, lookback_hours=lookback_hours, explicit=bool(cve_ids)
+    )
+    start, fetch_end = window.start, window.end
+    if not cve_ids:
+        print(f"collection window: {window.describe()}", file=sys.stderr)
     oldest_allowed = end - timedelta(hours=config.scan.maximum_cve_age_hours)
+    if config.scan.published_since is not None:
+        since = datetime.combine(
+            config.scan.published_since, datetime.min.time(), tzinfo=timezone.utc
+        )
+        # Every CVE published on or after the configured date is eligible,
+        # regardless of maximum_cve_age_hours.
+        oldest_allowed = since
 
-    nvd = nvd_client or NVDClient(config.feeds.nvd_url)
+    nvd = nvd_client or _cve_feed(config)
+    intel_source = intel_collector or IntelCollector.from_feeds(config.feeds)
     if cve_ids:
         cves = [
             cve
@@ -75,19 +95,34 @@ def run_scan(
             if (cve := nvd.fetch_by_id(cve_id)) is not None
         ]
     else:
-        cves = nvd.fetch_modified(start, end)
+        cves = nvd.fetch_modified(start, fetch_end)
 
     kev_entries: dict[str, KEVEntry] = {}
     kev_status: SourceStatus | None = None
-    if config.feeds.kev_url and not cve_ids:
-        kev = kev_client or KEVClient(config.feeds.kev_url)
+    kev = kev_client or _kev_feed(config)
+    if kev is not None and not cve_ids:
         try:
             kev_entries = kev.fetch_added_since(start.date())
             known = {cve.cve_id for cve in cves}
+            revived = 0
             for cve_id in sorted(set(kev_entries).difference(known)):
+                if revived >= _MAX_NEW_KEV_PER_RUN:
+                    print(
+                        f"KEV: more than {_MAX_NEW_KEV_PER_RUN} new entries; "
+                        "the rest are checked on the next run",
+                        file=sys.stderr,
+                    )
+                    break
                 cve = nvd.fetch_by_id(cve_id)
-                if cve is not None:
-                    cves.append(cve)
+                if cve is None:
+                    continue
+                # CISA's own dateAdded (from the NVD record) wins over the
+                # catalog mirror's timestamps, which may be sync times.
+                if cve.kev_date_added and cve.kev_date_added < start.date().isoformat():
+                    kev_entries.pop(cve_id, None)
+                    continue
+                cves.append(cve)
+                revived += 1
             kev_status = SourceStatus("CISA KEV", "ok")
         except (OSError, ValueError) as error:
             kev_status = SourceStatus("CISA KEV", "unavailable", str(error))
@@ -102,7 +137,10 @@ def run_scan(
     cves = list(unique_cves.values())
     explicit_ids = {value.upper() for value in cve_ids}
 
-    with StateStore(":memory:" if dry_run else state_path) as state:
+    if test_post and not cve_ids:
+        raise ValueError("test_post requires explicit CVE IDs")
+    # A test post goes to Telegram but never touches the monitoring state.
+    with StateStore(":memory:" if dry_run or test_post else state_path) as state:
         for cve in cves:
             state.record_seen(cve.cve_id, end)
             already_monitored = state.is_monitored(cve.cve_id)
@@ -126,36 +164,83 @@ def run_scan(
                         cve.cve_id in kev_entries or cve.cve_id in explicit_ids
                     ),
                 )
+        # Everything collected is stored now: the next run continues from here.
+        if window.advances_cursor and not (dry_run or test_post):
+            state.set_collection_cursor(fetch_end)
 
-        candidates = state.due_monitored(
-            end, limit=config.scan.maximum_cves_per_run
+        gated = config.scan.alert_gate != "off" and not explicit_ids
+        due = state.due_monitored(
+            end, limit=None if gated else config.scan.maximum_cves_per_run
         )
 
-        if not candidates:
+        if not due:
             return ScanResult(fetched=len(cves), matched=0, notified=0)
 
+        # KEV status for every due CVE (not only entries added this window),
+        # so a monitored CVE is picked up as soon as CISA adds it.
+        if gated and kev is not None and kev_status is not None:
+            if kev_status.state == "ok":
+                fetch_all = getattr(kev, "fetch_all", None)
+                catalog = fetch_all() if callable(fetch_all) else kev_entries
+                due = [_apply_kev(cve, catalog.get(cve.cve_id)) for cve in due]
+
         epss_status: SourceStatus | None = None
-        if config.feeds.epss_url:
-            epss = epss_client or EPSSClient(config.feeds.epss_url)
+        epss = epss_client or _epss_feed(config)
+        if epss is not None:
             try:
-                scores = epss.fetch_scores([cve.cve_id for cve in candidates])
-                candidates = [
+                scores = epss.fetch_scores([cve.cve_id for cve in due])
+                due = [
                     replace(
                         cve,
-                        epss_score=scores.get(cve.cve_id, (None, None))[0],
-                        epss_percentile=scores.get(cve.cve_id, (None, None))[1],
+                        epss_score=scores[cve.cve_id][0],
+                        epss_percentile=scores[cve.cve_id][1],
                     )
-                    for cve in candidates
+                    if cve.cve_id in scores
+                    else cve
+                    for cve in due
                 ]
                 epss_status = SourceStatus("EPSS", "ok")
             except (OSError, ValueError, KeyError) as error:
                 epss_status = SourceStatus("EPSS", "unavailable", str(error))
+                print(f"EPSS enrichment unavailable: {error}", file=sys.stderr)
+
+        if intel_source is not None:
+            due = [_with_record_cvss(cve, intel_source) for cve in due]
+
+        candidates: list[CVE] = []
+        for cve in due:
+            # The gate also applies to follow-ups on CVEs alerted earlier (for
+            # example before the gate was configured): no reply is posted
+            # unless the CVE meets the configured KEV / EPSS conditions.
+            if gated and not passes_alert_gate(cve, config.scan):
+                # Not enough exploitation signal yet: keep watching it so a
+                # later EPSS rise or KEV listing still triggers an alert.
+                if not dry_run:
+                    state.schedule_next_check(
+                        cve,
+                        end,
+                        early_hours=config.scan.early_recheck_hours,
+                        later_hours=config.scan.later_recheck_hours,
+                    )
+                continue
+            candidates.append(cve)
+        candidates = candidates[: config.scan.maximum_cves_per_run]
+        if gated:
+            _print_gate_summary(due, config, len(candidates))
+
+        if not candidates:
+            return ScanResult(fetched=len(cves), matched=0, notified=0)
 
         exploits = exploit_client or ExploitDBClient(config.feeds.exploitdb_csv_url)
         github = github_client or GitHubPoCClient(
             candidate_limit=config.scan.github_candidates,
             readme_limit=config.scan.github_readme_checks,
         )
+        intel_by_id: dict[str, Intel] = {}
+        if intel_source is not None:
+            fresh = [cve.cve_id for cve in candidates if not state.was_notified(cve.cve_id)]
+            if fresh:
+                intel_by_id = intel_source.collect(fresh)
         telegram = None if dry_run else telegram_factory()
         notified = 0
         source_failures = 0
@@ -205,6 +290,7 @@ def run_scan(
                 is_update=was_notified,
                 source_statuses=statuses,
                 explain=explain,
+                intel=intel_by_id.get(cve.cve_id) if not was_notified else None,
             )
             if dry_run:
                 print(message)
@@ -212,6 +298,8 @@ def run_scan(
                     print()
             else:
                 assert telegram is not None
+                if test_post:
+                    message = "🧪 <b>ТЕСТОВЫЙ ПОСТ</b> (проверка бота)\n\n" + message
                 message_id = telegram.send(
                     message,
                     reply_to_message_id=(
@@ -284,14 +372,250 @@ def _find_exploits(
     return EnrichmentResult(ranked, tuple(statuses))
 
 
+_MAX_NEW_KEV_PER_RUN = 50
+
+
+@dataclass(frozen=True)
+class CollectionWindow:
+    start: datetime
+    end: datetime
+    reason: str
+    advances_cursor: bool
+
+    def describe(self) -> str:
+        span = (self.end - self.start).total_seconds() / 3600
+        return (
+            f"{self.start:%Y-%m-%d %H:%M} → {self.end:%Y-%m-%d %H:%M} UTC "
+            f"({span:.1f} h, {self.reason})"
+        )
+
+
+def collection_window(
+    config: AppConfig,
+    state_path: Path,
+    now: datetime,
+    *,
+    lookback_hours: int | None = None,
+    explicit: bool = False,
+) -> CollectionWindow:
+    """Window of NVD modifications to read in this run.
+
+    Continues from the end of the last successful collection (minus an
+    overlap), so a pause of the scheduler does not lose CVEs. A long pause is
+    caught up in chunks of at most ``max_window_hours`` per run, going back no
+    further than ``max_catch_up_days``.
+    """
+    scan = config.scan
+    if explicit or lookback_hours:
+        hours = lookback_hours or scan.lookback_hours
+        return CollectionWindow(now - timedelta(hours=hours), now, "manual", False)
+    cursor = None
+    if Path(state_path).exists():
+        with StateStore(state_path) as state:
+            cursor = state.collection_cursor()
+    if cursor is None:
+        start = now - timedelta(hours=scan.lookback_hours)
+        return CollectionWindow(start, now, "first run", True)
+    if cursor.tzinfo is None:
+        cursor = cursor.replace(tzinfo=timezone.utc)
+    floor = now - timedelta(days=scan.max_catch_up_days)
+    start = max(cursor - timedelta(minutes=scan.overlap_minutes), floor)
+    end = min(now, start + timedelta(hours=scan.max_window_hours))
+    reason = "since last collection" if end >= now else "catching up"
+    if start == floor and cursor < floor:
+        reason += f", gap capped at {scan.max_catch_up_days} days"
+    return CollectionWindow(start, end, reason, True)
+
+
+class _FallbackFeed:
+    """A CIRCL-backed client with the direct upstream source as a safety net."""
+
+    def __init__(self, primary, fallback, name: str, fallback_name: str = "NVD") -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.name = name
+        self.fallback_name = fallback_name
+        self._use_fallback = False
+
+    def _call(self, method: str, *args):
+        if not self._use_fallback:
+            try:
+                return getattr(self.primary, method)(*args)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                if self.fallback is None:
+                    raise
+                print(
+                    f"{self.name} unavailable ({error}); falling back to {self.fallback_name}",
+                    file=sys.stderr,
+                )
+                self._use_fallback = True
+        return getattr(self.fallback, method)(*args)
+
+    def fetch_modified(self, start, end):
+        return self._call("fetch_modified", start, end)
+
+    def fetch_by_id(self, cve_id):
+        return self._call("fetch_by_id", cve_id)
+
+    def fetch_scores(self, cve_ids):
+        return self._call("fetch_scores", cve_ids)
+
+    def fetch_added_since(self, since):
+        return self._call("fetch_added_since", since)
+
+    def fetch_all(self):
+        return self._call("fetch_all")
+
+
+class _GapFillingEPSS:
+    """EPSS from CIRCL, with FIRST queried for every CVE CIRCL has no score for.
+
+    CIRCL may serve EPSS from its own copy, which can lag behind FIRST for new
+    CVEs and answers "not found" instead of failing, so a plain fallback would
+    never reach FIRST for them.
+    """
+
+    def __init__(self, primary, direct) -> None:
+        self.primary = primary
+        self.direct = direct
+
+    def fetch_scores(self, cve_ids):
+        ids = sorted({value.upper() for value in cve_ids})
+        scores: dict[str, tuple[float, float]] = {}
+        circl_error = None
+        try:
+            scores.update(self.primary.fetch_scores(ids))
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            circl_error = error
+        from_circl = len(scores)
+        missing = [cve_id for cve_id in ids if cve_id not in scores]
+        from_first = 0
+        if missing and self.direct is not None:
+            try:
+                direct = self.direct.fetch_scores(missing)
+                from_first = len(direct)
+                scores.update(direct)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                print(f"FIRST EPSS unavailable: {error}", file=sys.stderr)
+                if circl_error is not None:
+                    raise
+        elif circl_error is not None:
+            raise circl_error
+        print(
+            f"EPSS: requested={len(ids)} from_circl={from_circl} "
+            f"from_first={from_first} missing={len(ids) - len(scores)}"
+            + (f" (CIRCL error: {circl_error})" if circl_error else "")
+        )
+        return scores
+
+
+def _epss_feed(config: AppConfig):
+    feeds = config.feeds
+    direct = EPSSClient(feeds.epss_url) if feeds.epss_url else None
+    if feeds.epss_source != "circl":
+        return direct
+    return _GapFillingEPSS(CIRCLEPSSClient(feeds.circl_cve_url), direct)
+
+
+def _kev_feed(config: AppConfig):
+    feeds = config.feeds
+    direct = KEVClient(feeds.kev_url) if feeds.kev_url else None
+    if feeds.kev_source != "circl":
+        return direct
+    return _FallbackFeed(
+        CIRCLKEVClient(feeds.circl_cve_url, catalog_uuid=feeds.circl_kev_catalog),
+        direct,
+        "CIRCL CISA KEV",
+        "CISA KEV feed",
+    )
+
+
+def _cve_feed(config: AppConfig):
+    feeds = config.feeds
+    if feeds.cve_source != "circl":
+        return NVDClient(feeds.nvd_url)
+    fallback = NVDClient(feeds.nvd_url) if feeds.fallback_to_nvd and feeds.nvd_url else None
+    print(f"CVE source: CIRCL Vulnerability-Lookup ({feeds.circl_cve_url})", file=sys.stderr)
+    return _FallbackFeed(
+        CIRCLVulnerabilityClient(feeds.circl_cve_url), fallback, "CIRCL Vulnerability-Lookup"
+    )
+
+
+def _print_gate_summary(due: list[CVE], config: AppConfig, passed: int) -> None:
+    scan = config.scan
+    severe = [
+        cve
+        for cve in due
+        if not scan.severities or (cve.cvss_severity or "").upper() in scan.severities
+    ]
+    kev = [cve for cve in severe if cve.known_exploited]
+    hot = [
+        cve
+        for cve in severe
+        if cve.epss_score is not None and cve.epss_score >= scan.minimum_epss
+    ]
+    no_epss = sum(cve.epss_score is None for cve in severe)
+    samples = sorted(
+        (cve for cve in severe if cve.epss_score is None), key=lambda cve: cve.published
+    )[:5]
+    for cve in samples:
+        print(
+            f"  no EPSS yet: {cve.cve_id} published {cve.published:%Y-%m-%d %H:%M} UTC "
+            f"{cve.cvss_severity}"
+        )
+    print(
+        f"alert gate ({scan.alert_gate}, EPSS >= {scan.minimum_epss:.0%}): "
+        f"checked={len(due)} high/critical={len(severe)} in_kev={len(kev)} "
+        f"epss_ok={len(hot)} epss_missing={no_epss} passed={passed}"
+    )
+    closest = sorted(
+        {cve.cve_id: cve for cve in kev + hot}.values(),
+        key=lambda cve: -(cve.epss_score or 0.0),
+    )[:5]
+    for cve in closest:
+        epss = f"{cve.epss_score:.1%}" if cve.epss_score is not None else "n/a"
+        print(
+            f"  near miss: {cve.cve_id} {cve.cvss_severity} "
+            f"KEV={'yes' if cve.known_exploited else 'no'} EPSS={epss}"
+        )
+
+
+def _with_record_cvss(cve: CVE, collector: IntelCollector) -> CVE:
+    # NVD often lags behind; use the CVSS from the CVE record (CNA or CISA
+    # Vulnrichment) for KEV entries that NVD has not scored yet.
+    if cve.cvss_score is not None or not cve.known_exploited:
+        return cve
+    fallback = collector.record_cvss(cve.cve_id)
+    if fallback is None:
+        return cve
+    score, severity, version, vector = fallback
+    return replace(
+        cve,
+        cvss_score=score,
+        cvss_severity=severity or _severity_from_score(score),
+        cvss_version=version,
+        cvss_vector=vector,
+    )
+
+
+def _severity_from_score(score: float) -> str:
+    if score >= 9.0:
+        return "CRITICAL"
+    if score >= 7.0:
+        return "HIGH"
+    if score >= 4.0:
+        return "MEDIUM"
+    return "LOW" if score > 0 else "NONE"
+
+
 def _apply_kev(cve: CVE, entry: KEVEntry | None) -> CVE:
     if entry is None:
         return cve
     return replace(
         cve,
         known_exploited=True,
-        kev_date_added=entry.date_added,
-        kev_due_date=entry.due_date,
-        kev_required_action=entry.required_action,
-        known_ransomware_use=entry.known_ransomware_use,
+        kev_date_added=cve.kev_date_added or entry.date_added,
+        kev_due_date=entry.due_date or cve.kev_due_date,
+        kev_required_action=entry.required_action or cve.kev_required_action,
+        known_ransomware_use=entry.known_ransomware_use or cve.known_ransomware_use,
     )

@@ -33,6 +33,12 @@ class EPSSClient:
                 headers={"Accept": "application/json", "User-Agent": "cve-signal/0.2"},
             )
             payload = json.loads(self._opener(request, self.timeout))
+            data = payload.get("data", []) or []
+            print(
+                f"FIRST EPSS batch: asked={len(batch)} status={payload.get('status')} "
+                f"total={payload.get('total')} returned={len(data)} "
+                f"first_ids={','.join(batch[:3])}"
+            )
             for item in payload.get("data", []):
                 cve_id = str(item.get("cve", "")).upper()
                 if not cve_id:

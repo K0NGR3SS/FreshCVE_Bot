@@ -542,8 +542,126 @@ class PipelineTests(unittest.TestCase):
 
         self.assertEqual(result.notified, 1)
         self.assertIn("CISA KEV", telegram.messages[0])
-        self.assertIn("EPSS 42.0%", telegram.messages[0])
+        self.assertIn("EPSS: 42.0%", telegram.messages[0])
         self.assertIn("KEV due:</b> 2026-09-01", telegram.messages[0])
+
+    def test_alert_gate_waits_for_kev_or_epss_threshold(self) -> None:
+        class ChangingEPSS:
+            score = 0.05
+
+            def fetch_scores(self, cve_ids):
+                return {cve_id: (self.score, 0.5) for cve_id in cve_ids}
+
+        class EmptyKEV:
+            def fetch_added_since(self, _since):
+                return {}
+
+        config = replace(
+            self.config,
+            scan=replace(self.config.scan, alert_gate="any", minimum_epss=0.2),
+            feeds=replace(
+                self.config.feeds,
+                epss_url="https://example.test/epss",
+                kev_url="https://example.test/kev.json",
+            ),
+        )
+        telegram = RecordingTelegram()
+        epss = ChangingEPSS()
+        exploit_client = ExploitDBClient(
+            config.feeds.exploitdb_csv_url,
+            fetcher=lambda _url, _timeout: EXPLOIT_DB_CSV,
+        )
+        cve = replace(interesting_cve(), known_exploited=False)
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.sqlite3"
+            common = {
+                "nvd_client": StaticNVDClient([cve]),
+                "exploit_client": exploit_client,
+                "github_client": StaticGitHubPoCClient(),
+                "epss_client": epss,
+                "kev_client": EmptyKEV(),
+                "telegram_factory": lambda: telegram,
+            }
+            first = run_scan(
+                config,
+                state_path,
+                now=datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc),
+                **common,
+            )
+            epss.score = 0.35
+            second = run_scan(
+                config,
+                state_path,
+                now=datetime(2026, 8, 20, 14, 0, tzinfo=timezone.utc),
+                **common,
+            )
+
+        self.assertEqual((first.notified, second.notified), (0, 1))
+        self.assertIn("EPSS: 35.0%", telegram.messages[0])
+        self.assertIn("CISA KEV: no", telegram.messages[0])
+
+    def test_gate_also_blocks_follow_ups_for_earlier_alerts(self) -> None:
+        class NoEPSS:
+            def fetch_scores(self, cve_ids):
+                return {}
+
+        class EmptyKEV:
+            def fetch_added_since(self, _since):
+                return {}
+
+        github_match = ExploitMatch(
+            title="researcher/CVE-2026-12345",
+            url="https://github.com/researcher/CVE-2026-12345",
+            source="GitHub",
+            score=115.0,
+            reason="exact CVE ID in repository name",
+            exploit_type="PoC candidate",
+            confidence="strong",
+        )
+        telegram = RecordingTelegram()
+        github = StaticGitHubPoCClient()
+        cve = replace(interesting_cve(), known_exploited=False)
+        exploit_client = ExploitDBClient(
+            self.config.feeds.exploitdb_csv_url,
+            fetcher=lambda _url, _timeout: EXPLOIT_DB_CSV,
+        )
+        gated = replace(
+            self.config,
+            scan=replace(self.config.scan, alert_gate="any", minimum_epss=0.2),
+            feeds=replace(
+                self.config.feeds,
+                epss_url="https://example.test/epss",
+                kev_url="https://example.test/kev.json",
+            ),
+        )
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.sqlite3"
+            common = {
+                "nvd_client": StaticNVDClient([cve]),
+                "exploit_client": exploit_client,
+                "github_client": github,
+                "telegram_factory": lambda: telegram,
+            }
+            # Alerted while no gate was configured.
+            first = run_scan(
+                self.config,
+                state_path,
+                now=datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc),
+                **common,
+            )
+            github.matches = [github_match]
+            # Now gated: a new PoC must not produce a reply below the gate.
+            second = run_scan(
+                gated,
+                state_path,
+                now=datetime(2026, 8, 20, 14, 0, tzinfo=timezone.utc),
+                epss_client=NoEPSS(),
+                kev_client=EmptyKEV(),
+                **common,
+            )
+
+        self.assertEqual((first.notified, second.notified), (1, 0))
+        self.assertEqual(len(telegram.messages), 1)
 
     def test_ignores_old_cve_that_was_only_recently_modified(self) -> None:
         old_cve = replace(
@@ -612,3 +730,142 @@ class FeedEnrichmentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPostTests(unittest.TestCase):
+    def test_test_post_sends_marked_alert_without_state(self) -> None:
+        config = AppConfig(
+            scan=scan_config(),
+            feeds=FeedConfig(
+                nvd_url="https://nvd.test",
+                exploitdb_csv_url="https://exploitdb.test/files.csv",
+            ),
+        )
+        telegram = RecordingTelegram()
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.sqlite3"
+            result = run_scan(
+                config,
+                state_path,
+                test_post=True,
+                cve_ids=("CVE-2026-12345",),
+                now=datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc),
+                nvd_client=StaticNVDClient([interesting_cve()]),
+                exploit_client=ExploitDBClient(
+                    config.feeds.exploitdb_csv_url,
+                    fetcher=lambda _url, _timeout: EXPLOIT_DB_CSV,
+                ),
+                github_client=StaticGitHubPoCClient(),
+                telegram_factory=lambda: telegram,
+            )
+            self.assertFalse(state_path.exists())
+        self.assertEqual(result.notified, 1)
+        self.assertTrue(telegram.messages[0].startswith("🧪 <b>ТЕСТОВЫЙ ПОСТ</b>"))
+
+    def test_test_post_requires_cve_ids(self) -> None:
+        with self.assertRaises(ValueError):
+            run_scan(
+                AppConfig(
+                    scan=scan_config(),
+                    feeds=FeedConfig(nvd_url="https://nvd.test", exploitdb_csv_url="x"),
+                ),
+                Path("unused.sqlite3"),
+                test_post=True,
+                nvd_client=StaticNVDClient([]),
+            )
+
+
+class CollectionWindowTests(unittest.TestCase):
+    NOW = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc)
+
+    def config(self):
+        return AppConfig(
+            scan=replace(scan_config(), lookback_hours=24, overlap_minutes=120,
+                         max_window_hours=168, max_catch_up_days=60),
+            feeds=FeedConfig(nvd_url="https://nvd.test", exploitdb_csv_url="https://x.test"),
+        )
+
+    def window(self, state_path, now=None, **kw):
+        from cve_signal.pipeline import collection_window
+
+        return collection_window(self.config(), state_path, now or self.NOW, **kw)
+
+    def set_cursor(self, state_path, value):
+        from cve_signal.state import StateStore
+
+        with StateStore(state_path) as state:
+            state.set_collection_cursor(value)
+
+    def test_first_run_then_continues_from_cursor(self) -> None:
+        from datetime import timedelta
+
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "state.sqlite3"
+            first = self.window(path)
+            self.assertEqual((first.start, first.reason), (self.NOW - timedelta(hours=24), "first run"))
+            self.set_cursor(path, self.NOW - timedelta(hours=3))
+            regular = self.window(path)
+            self.assertEqual(regular.start, self.NOW - timedelta(hours=5))
+            self.assertEqual(regular.end, self.NOW)
+
+    def test_long_pause_is_caught_up_in_chunks_and_capped(self) -> None:
+        from datetime import timedelta
+
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "state.sqlite3"
+            self.set_cursor(path, self.NOW - timedelta(days=10))
+            chunk = self.window(path)
+            self.assertEqual(chunk.start, self.NOW - timedelta(days=10, hours=2))
+            self.assertEqual(chunk.end, chunk.start + timedelta(hours=168))
+            self.assertEqual(chunk.reason, "catching up")
+            self.set_cursor(path, self.NOW - timedelta(days=90))
+            capped = self.window(path)
+            self.assertEqual(capped.start, self.NOW - timedelta(days=60))
+            self.assertIn("capped at 60 days", capped.reason)
+
+    def test_manual_windows_do_not_move_the_cursor(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "state.sqlite3"
+            self.assertFalse(self.window(path, lookback_hours=6).advances_cursor)
+            self.assertFalse(self.window(path, explicit=True).advances_cursor)
+
+    def test_scan_reads_from_cursor_and_advances_it(self) -> None:
+        from datetime import timedelta
+        from cve_signal.state import StateStore
+
+        class WindowNVD(StaticNVDClient):
+            def __init__(self, cves, error=None):
+                super().__init__(cves)
+                self.windows, self.error = [], error
+
+            def fetch_modified(self, start, end):
+                self.windows.append((start, end))
+                if self.error:
+                    raise self.error
+                return super().fetch_modified(start, end)
+
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "state.sqlite3"
+            self.set_cursor(path, self.NOW - timedelta(days=3))
+            nvd = WindowNVD([])
+            with redirect_stdout(io.StringIO()):
+                run_scan(self.config(), path, now=self.NOW, nvd_client=nvd,
+                         telegram_factory=lambda: self.fail("no telegram"))
+            self.assertEqual(nvd.windows[0], (self.NOW - timedelta(days=3, hours=2), self.NOW))
+            with StateStore(path) as state:
+                self.assertEqual(state.collection_cursor(), self.NOW)
+
+            # A failed collection leaves the cursor where it was.
+            broken = WindowNVD([], error=OSError("down"))
+            with self.assertRaises(OSError):
+                run_scan(self.config(), path, now=self.NOW + timedelta(hours=3), nvd_client=broken)
+            with StateStore(path) as state:
+                self.assertEqual(state.collection_cursor(), self.NOW)
+
+            # A dry run reads the cursor but never moves it.
+            dry = WindowNVD([])
+            with redirect_stdout(io.StringIO()):
+                run_scan(self.config(), path, now=self.NOW + timedelta(hours=6), nvd_client=dry, dry_run=True)
+            self.assertEqual(dry.windows[0][0], self.NOW - timedelta(hours=2))
+            with StateStore(path) as state:
+                self.assertEqual(state.collection_cursor(), self.NOW)
