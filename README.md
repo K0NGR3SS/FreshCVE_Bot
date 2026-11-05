@@ -12,7 +12,7 @@ I built this pipeline for personal use, but its severity thresholds, CWE filters
 
 ## What it does
 
-Every three hours, GitHub Actions:
+Every hour, GitHub Actions:
 
 1. Fetches CVEs changed since the last successful collection (minus a 2-hour overlap) and newly added CISA KEV entries. A paused schedule is caught up in chunks of up to 7 days per run, up to 60 days back.
 2. Filters them by CVSS, KEV status, CWE, cloud/web technology, and configurable keywords.
@@ -52,7 +52,7 @@ Add these repository secrets:
 
 The GitHub PoC search uses the short-lived, read-only `GITHUB_TOKEN` created automatically by GitHub Actions. You do not need to create another GitHub secret.
 
-Enable Actions in your fork and run the **CVE Signal** workflow manually with `dry_run` enabled. Once the output looks right, run it with `dry_run` disabled. Scheduled runs then execute every three hours.
+Enable Actions in your fork and run the **CVE Signal** workflow manually with `dry_run` enabled. Once the output looks right, run it with `dry_run` disabled. Scheduled runs then execute every hour (at :17 UTC). A second daily schedule (15:47 UTC) replies to posted CVEs whose CISA KEV status or EPSS score changed; the same refresh can be started by hand with the `refresh_scores` input.
 
 Edit [`config.toml`](config.toml) to change:
 
