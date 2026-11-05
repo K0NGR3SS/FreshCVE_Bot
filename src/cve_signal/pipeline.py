@@ -71,8 +71,12 @@ def run_scan(
     end = now or datetime.now(timezone.utc)
     if end.tzinfo is None:
         end = end.replace(tzinfo=timezone.utc)
-    hours = lookback_hours or config.scan.lookback_hours
-    start = end - timedelta(hours=hours)
+    window = collection_window(
+        config, state_path, end, lookback_hours=lookback_hours, explicit=bool(cve_ids)
+    )
+    start, fetch_end = window.start, window.end
+    if not cve_ids:
+        print(f"collection window: {window.describe()}", file=sys.stderr)
     oldest_allowed = end - timedelta(hours=config.scan.maximum_cve_age_hours)
     if config.scan.published_since is not None:
         since = datetime.combine(
@@ -91,7 +95,7 @@ def run_scan(
             if (cve := nvd.fetch_by_id(cve_id)) is not None
         ]
     else:
-        cves = nvd.fetch_modified(start, end)
+        cves = nvd.fetch_modified(start, fetch_end)
 
     kev_entries: dict[str, KEVEntry] = {}
     kev_status: SourceStatus | None = None
@@ -160,6 +164,9 @@ def run_scan(
                         cve.cve_id in kev_entries or cve.cve_id in explicit_ids
                     ),
                 )
+        # Everything collected is stored now: the next run continues from here.
+        if window.advances_cursor and not (dry_run or test_post):
+            state.set_collection_cursor(fetch_end)
 
         gated = config.scan.alert_gate != "off" and not explicit_ids
         due = state.due_monitored(
@@ -366,6 +373,58 @@ def _find_exploits(
 
 
 _MAX_NEW_KEV_PER_RUN = 50
+
+
+@dataclass(frozen=True)
+class CollectionWindow:
+    start: datetime
+    end: datetime
+    reason: str
+    advances_cursor: bool
+
+    def describe(self) -> str:
+        span = (self.end - self.start).total_seconds() / 3600
+        return (
+            f"{self.start:%Y-%m-%d %H:%M} → {self.end:%Y-%m-%d %H:%M} UTC "
+            f"({span:.1f} h, {self.reason})"
+        )
+
+
+def collection_window(
+    config: AppConfig,
+    state_path: Path,
+    now: datetime,
+    *,
+    lookback_hours: int | None = None,
+    explicit: bool = False,
+) -> CollectionWindow:
+    """Window of NVD modifications to read in this run.
+
+    Continues from the end of the last successful collection (minus an
+    overlap), so a pause of the scheduler does not lose CVEs. A long pause is
+    caught up in chunks of at most ``max_window_hours`` per run, going back no
+    further than ``max_catch_up_days``.
+    """
+    scan = config.scan
+    if explicit or lookback_hours:
+        hours = lookback_hours or scan.lookback_hours
+        return CollectionWindow(now - timedelta(hours=hours), now, "manual", False)
+    cursor = None
+    if Path(state_path).exists():
+        with StateStore(state_path) as state:
+            cursor = state.collection_cursor()
+    if cursor is None:
+        start = now - timedelta(hours=scan.lookback_hours)
+        return CollectionWindow(start, now, "first run", True)
+    if cursor.tzinfo is None:
+        cursor = cursor.replace(tzinfo=timezone.utc)
+    floor = now - timedelta(days=scan.max_catch_up_days)
+    start = max(cursor - timedelta(minutes=scan.overlap_minutes), floor)
+    end = min(now, start + timedelta(hours=scan.max_window_hours))
+    reason = "since last collection" if end >= now else "catching up"
+    if start == floor and cursor < floor:
+        reason += f", gap capped at {scan.max_catch_up_days} days"
+    return CollectionWindow(start, end, reason, True)
 
 
 class _FallbackFeed:

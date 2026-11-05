@@ -63,6 +63,31 @@ class StateStore:
     def close(self) -> None:
         self._connection.close()
 
+    # ------------------------------------------------------- collection cursor
+
+    def collection_cursor(self) -> datetime | None:
+        """End of the last successfully collected window."""
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS scan_cursor (name TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        row = self._connection.execute(
+            "SELECT value FROM scan_cursor WHERE name = 'collected_until'"
+        ).fetchone()
+        return datetime.fromisoformat(str(row[0])) if row else None
+
+    def set_collection_cursor(self, value: datetime) -> None:
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS scan_cursor (name TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        self._connection.execute(
+            """
+            INSERT INTO scan_cursor (name, value) VALUES ('collected_until', ?)
+            ON CONFLICT(name) DO UPDATE SET value = excluded.value
+            """,
+            (value.isoformat(),),
+        )
+        self._connection.commit()
+
     # ------------------------------------------------- score refresh (KEV/EPSS)
 
     def _ensure_score_reports(self) -> None:

@@ -14,7 +14,7 @@ I built this pipeline for personal use, but its severity thresholds, CWE filters
 
 Every three hours, GitHub Actions:
 
-1. Fetches recently published or updated CVEs from NVD and newly added CISA KEV entries.
+1. Fetches CVEs changed since the last successful collection (minus a 2-hour overlap) and newly added CISA KEV entries. A paused schedule is caught up in chunks of up to 7 days per run, up to 60 days back.
 2. Filters them by CVSS, KEV status, CWE, cloud/web technology, and configurable keywords.
 3. Adds EPSS probability and percentile data.
 4. Searches exploit-oriented NVD references, Exploit-DB metadata, and public GitHub repositories.
