@@ -24,6 +24,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Send the --cve alerts to Telegram as a marked test, without saving state.",
     )
+    parser.add_argument(
+        "--refresh-scores",
+        action="store_true",
+        help="Reply to posted CVEs whose CISA KEV / EPSS changed (with --dry-run: preview).",
+    )
+    parser.add_argument(
+        "--refresh-limit",
+        type=_positive_int,
+        help="Send at most this many refresh updates in one run.",
+    )
     parser.add_argument("--since-hours", type=_positive_int)
     parser.add_argument(
         "--cve",
@@ -73,6 +83,21 @@ def main(argv: list[str] | None = None) -> int:
             ("GitHub", "https://api.github.com/search/repositories"),
         ):
             print(f"{name}: {value or 'disabled'}")
+        return 0
+    if args.refresh_scores:
+        from cve_signal.refresh import run_refresh
+
+        try:
+            result = run_refresh(
+                config, args.state, dry_run=args.dry_run, limit=args.refresh_limit
+            )
+        except Exception as error:
+            print(f"cve-signal failed: {error}", file=sys.stderr)
+            return 1
+        print(
+            f"refresh: posted={result.posted} changed={result.changed} sent={result.sent} "
+            f"kev_new={result.kev_new} epss_new={result.epss_new}"
+        )
         return 0
     if not args.dry_run and args.format != "telegram-html":
         print("cve-signal failed: --format is only available with --dry-run", file=sys.stderr)

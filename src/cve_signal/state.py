@@ -63,6 +63,67 @@ class StateStore:
     def close(self) -> None:
         self._connection.close()
 
+    # ------------------------------------------------- score refresh (KEV/EPSS)
+
+    def _ensure_score_reports(self) -> None:
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS score_reports (
+                cve_id TEXT PRIMARY KEY,
+                epss REAL,
+                epss_percentile REAL,
+                kev INTEGER NOT NULL DEFAULT 0,
+                reported_at TEXT NOT NULL
+            )
+            """
+        )
+
+    def notified_entries(self) -> list[tuple[str, int, CVE | None]]:
+        """(cve_id, original Telegram message id, last stored CVE or None)."""
+        rows = self._connection.execute(
+            """
+            SELECT c.cve_id, c.original_message_id, m.payload
+            FROM cves c LEFT JOIN monitored_cves m ON m.cve_id = c.cve_id
+            WHERE c.notified_at IS NOT NULL AND c.original_message_id IS NOT NULL
+            ORDER BY c.notified_at
+            """
+        ).fetchall()
+        return [
+            (str(row[0]), int(row[1]), _deserialize_cve(str(row[2])) if row[2] else None)
+            for row in rows
+        ]
+
+    def last_score_report(self, cve_id: str) -> tuple[float | None, float | None, bool] | None:
+        self._ensure_score_reports()
+        row = self._connection.execute(
+            "SELECT epss, epss_percentile, kev FROM score_reports WHERE cve_id = ?", (cve_id,)
+        ).fetchone()
+        return (row[0], row[1], bool(row[2])) if row else None
+
+    def record_score_report(
+        self,
+        cve_id: str,
+        *,
+        epss: float | None,
+        epss_percentile: float | None,
+        kev: bool,
+        reported_at: datetime,
+    ) -> None:
+        self._ensure_score_reports()
+        self._connection.execute(
+            """
+            INSERT INTO score_reports (cve_id, epss, epss_percentile, kev, reported_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(cve_id) DO UPDATE SET
+                epss = excluded.epss,
+                epss_percentile = excluded.epss_percentile,
+                kev = excluded.kev,
+                reported_at = excluded.reported_at
+            """,
+            (cve_id, epss, epss_percentile, int(kev), reported_at.isoformat()),
+        )
+        self._connection.commit()
+
     def __enter__(self) -> StateStore:
         return self
 
