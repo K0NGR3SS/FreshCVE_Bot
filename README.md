@@ -12,9 +12,9 @@ I built this pipeline for personal use, but its severity thresholds, CWE filters
 
 ## What it does
 
-Every three hours, GitHub Actions:
+Every hour, GitHub Actions:
 
-1. Fetches recently published or updated CVEs from NVD and newly added CISA KEV entries.
+1. Fetches CVEs changed since the last successful collection (minus a 2-hour overlap) and newly added CISA KEV entries. A paused schedule is caught up in chunks of up to 7 days per run, up to 60 days back.
 2. Filters them by CVSS, KEV status, CWE, cloud/web technology, and configurable keywords.
 3. Adds EPSS probability and percentile data.
 4. Searches exploit-oriented NVD references, Exploit-DB metadata, and public GitHub repositories.
@@ -52,16 +52,26 @@ Add these repository secrets:
 
 The GitHub PoC search uses the short-lived, read-only `GITHUB_TOKEN` created automatically by GitHub Actions. You do not need to create another GitHub secret.
 
-Enable Actions in your fork and run the **CVE Signal** workflow manually with `dry_run` enabled. Once the output looks right, run it with `dry_run` disabled. Scheduled runs then execute every three hours.
+Enable Actions in your fork and run the **CVE Signal** workflow manually with `dry_run` enabled. Once the output looks right, run it with `dry_run` disabled. Scheduled runs then execute every hour (at :17 UTC). A second daily schedule (15:47 UTC) replies to posted CVEs whose CISA KEV status or EPSS score changed; the same refresh can be started by hand with the `refresh_scores` input.
 
 Edit [`config.toml`](config.toml) to change:
 
 - CVSS range and maximum CVE age.
+- `severities` (e.g. `["HIGH", "CRITICAL"]`); CISA KEV entries always pass.
+- `all_products = true` to alert on every product in NVD, ignoring the keyword and CWE lists.
+- `alert_gate` (`any`, `all`, `kev`, `epss`, `off`) with `minimum_epss` (e.g. `0.20` = 20%) to alert only on CVEs listed in CISA KEV and/or above an EPSS threshold; gated CVEs keep being rechecked until `monitoring_days` expires.
+- `published_since = "YYYY-MM-DD"` to include every CVE published on or after that date.
 - Monitoring duration and early/later recheck intervals.
 - Cloud providers and web technologies.
 - Vulnerability keywords and CWE identifiers.
 - Excluded terms, per-run CVE budget, number of exploit matches, GitHub candidate count, and README verification budget.
+- `cve_source`: list CVEs from `circl` ([CIRCL Vulnerability-Lookup](https://vulnerability.circl.lu), which bundles NVD, the CVE List with CISA Vulnrichment, GitHub, EUVD and more) or directly from `nvd`. With `fallback_to_nvd = true` a CIRCL outage falls back to NVD.
+- `epss_source` / `kev_source`: take EPSS and the CISA KEV catalog from CIRCL (`circl`) or directly from FIRST and CISA (`direct`). With `circl`, a CIRCL failure falls back to the direct feeds.
 - NVD, Exploit-DB, EPSS, and CISA KEV feed URLs.
+- Extra enrichment sources for richer alerts (each optional, leave empty to disable):
+  CVE.org with CISA Vulnrichment (vendor description, solution, SSVC, CVSS fallback),
+  GitHub Advisory Database and OSV.dev (fixed versions), BDU FSTEC (Russian description
+  and remediation), EUVD (ENISA) and CIRCL Vulnerability-Lookup (sightings).
 
 ## Run locally
 
@@ -81,6 +91,8 @@ PYTHONPATH=src python -m cve_signal --sources
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
+To try the enrichment on a real CVE from GitHub Actions, run the workflow manually with `dry_run` enabled and a CVE ID in the `cve` input.
+
 Dry-run formats are `telegram-html`, `text`, and newline-delimited `json`. Dry runs use an in-memory state database and do not change scheduled monitoring state. `--cve` bypasses the configured interest filter for targeted inspection but is intentionally restricted to dry-run mode.
 
 Set `NVD_API_KEY`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID` as environment variables before a live local run. Never commit them.
@@ -89,4 +101,4 @@ Set `NVD_API_KEY`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID` as environment v
 
 The matcher is deterministic and evidence-first. It uses exact CVE identifiers, NVD source tags, recognized exploit hosts, Exploit-DB verification metadata, product/version and vulnerability-class corroboration, and GitHub repository and README metadata. An LLM can be added later for summarization, but it should not be the authority that upgrades a candidate to confirmed evidence.
 
-Notification and monitoring state is stored in `data/state.sqlite3`. Existing databases are migrated automatically. The GitHub Actions workflow restores and saves this database between scheduled runs.
+Notification and monitoring state is stored in `data/state.sqlite3`. Existing databases are migrated automatically. Between runs, the GitHub Actions workflow keeps this database in the `bot-state` branch. The branch holds only the latest version, overwritten after every run that changed it, so the state does not expire the way Actions caches do (they are evicted after 7 days without access). An Actions cache copy is kept as a backup and seeds `bot-state` on the first run from the default branch. The workflow therefore needs `contents: write`.
