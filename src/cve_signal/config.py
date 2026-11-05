@@ -23,6 +23,10 @@ class ScanConfig:
     github_candidates: int = 50
     github_readme_checks: int = 10
     maximum_cves_per_run: int = 25
+    # Collection window: continue from the last successful collection.
+    overlap_minutes: int = 120
+    max_window_hours: int = 168
+    max_catch_up_days: int = 60
     all_products: bool = False
     published_since: date | None = None
     severities: frozenset[str] = frozenset()
@@ -84,6 +88,9 @@ def load_config(path: Path) -> AppConfig:
             github_candidates=int(scan.get("github_candidates", 50)),
             github_readme_checks=int(scan.get("github_readme_checks", 10)),
             maximum_cves_per_run=int(scan.get("maximum_cves_per_run", 25)),
+            overlap_minutes=int(scan.get("overlap_minutes", 120)),
+            max_window_hours=int(scan.get("max_window_hours", 168)),
+            max_catch_up_days=int(scan.get("max_catch_up_days", 60)),
             all_products=bool(scan.get("all_products", False)),
             published_since=_parse_date(scan.get("published_since")),
             alert_gate=str(scan.get("alert_gate", "off")).lower(),
@@ -151,6 +158,8 @@ def _validate(config: AppConfig) -> None:
         raise ValueError(
             "github_readme_checks must be between 0 and github_candidates"
         )
+    if scan.overlap_minutes < 0 or scan.max_window_hours <= 0 or scan.max_catch_up_days <= 0:
+        raise ValueError("collection window settings must be positive")
     if scan.maximum_cves_per_run <= 0:
         raise ValueError("maximum_cves_per_run must be positive")
     if scan.alert_gate not in {"off", "any", "all", "kev", "epss"}:

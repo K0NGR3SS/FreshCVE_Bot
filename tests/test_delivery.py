@@ -773,3 +773,99 @@ class TestPostTests(unittest.TestCase):
                 test_post=True,
                 nvd_client=StaticNVDClient([]),
             )
+
+
+class CollectionWindowTests(unittest.TestCase):
+    NOW = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc)
+
+    def config(self):
+        return AppConfig(
+            scan=replace(scan_config(), lookback_hours=24, overlap_minutes=120,
+                         max_window_hours=168, max_catch_up_days=60),
+            feeds=FeedConfig(nvd_url="https://nvd.test", exploitdb_csv_url="https://x.test"),
+        )
+
+    def window(self, state_path, now=None, **kw):
+        from cve_signal.pipeline import collection_window
+
+        return collection_window(self.config(), state_path, now or self.NOW, **kw)
+
+    def set_cursor(self, state_path, value):
+        from cve_signal.state import StateStore
+
+        with StateStore(state_path) as state:
+            state.set_collection_cursor(value)
+
+    def test_first_run_then_continues_from_cursor(self) -> None:
+        from datetime import timedelta
+
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "state.sqlite3"
+            first = self.window(path)
+            self.assertEqual((first.start, first.reason), (self.NOW - timedelta(hours=24), "first run"))
+            self.set_cursor(path, self.NOW - timedelta(hours=3))
+            regular = self.window(path)
+            self.assertEqual(regular.start, self.NOW - timedelta(hours=5))
+            self.assertEqual(regular.end, self.NOW)
+
+    def test_long_pause_is_caught_up_in_chunks_and_capped(self) -> None:
+        from datetime import timedelta
+
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "state.sqlite3"
+            self.set_cursor(path, self.NOW - timedelta(days=10))
+            chunk = self.window(path)
+            self.assertEqual(chunk.start, self.NOW - timedelta(days=10, hours=2))
+            self.assertEqual(chunk.end, chunk.start + timedelta(hours=168))
+            self.assertEqual(chunk.reason, "catching up")
+            self.set_cursor(path, self.NOW - timedelta(days=90))
+            capped = self.window(path)
+            self.assertEqual(capped.start, self.NOW - timedelta(days=60))
+            self.assertIn("capped at 60 days", capped.reason)
+
+    def test_manual_windows_do_not_move_the_cursor(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "state.sqlite3"
+            self.assertFalse(self.window(path, lookback_hours=6).advances_cursor)
+            self.assertFalse(self.window(path, explicit=True).advances_cursor)
+
+    def test_scan_reads_from_cursor_and_advances_it(self) -> None:
+        from datetime import timedelta
+        from cve_signal.state import StateStore
+
+        class WindowNVD(StaticNVDClient):
+            def __init__(self, cves, error=None):
+                super().__init__(cves)
+                self.windows, self.error = [], error
+
+            def fetch_modified(self, start, end):
+                self.windows.append((start, end))
+                if self.error:
+                    raise self.error
+                return super().fetch_modified(start, end)
+
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "state.sqlite3"
+            self.set_cursor(path, self.NOW - timedelta(days=3))
+            nvd = WindowNVD([])
+            with redirect_stdout(io.StringIO()):
+                run_scan(self.config(), path, now=self.NOW, nvd_client=nvd,
+                         telegram_factory=lambda: self.fail("no telegram"))
+            self.assertEqual(nvd.windows[0], (self.NOW - timedelta(days=3, hours=2), self.NOW))
+            with StateStore(path) as state:
+                self.assertEqual(state.collection_cursor(), self.NOW)
+
+            # A failed collection leaves the cursor where it was.
+            broken = WindowNVD([], error=OSError("down"))
+            with self.assertRaises(OSError):
+                run_scan(self.config(), path, now=self.NOW + timedelta(hours=3), nvd_client=broken)
+            with StateStore(path) as state:
+                self.assertEqual(state.collection_cursor(), self.NOW)
+
+            # A dry run reads the cursor but never moves it.
+            dry = WindowNVD([])
+            with redirect_stdout(io.StringIO()):
+                run_scan(self.config(), path, now=self.NOW + timedelta(hours=6), nvd_client=dry, dry_run=True)
+            self.assertEqual(dry.windows[0][0], self.NOW - timedelta(hours=2))
+            with StateStore(path) as state:
+                self.assertEqual(state.collection_cursor(), self.NOW)
